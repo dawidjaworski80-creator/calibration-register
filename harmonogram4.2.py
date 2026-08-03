@@ -183,7 +183,7 @@ class SplashScreen(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
 
-        # Tytuł okna
+        # Window title
         self.title("Machine Shop Schedule Pro - Start")
 
         # Rozmiar okna
@@ -217,7 +217,7 @@ class SplashScreen(tk.Toplevel):
 
         subtitle_label = tk.Label(
             self,
-            text="System Zarządzania Harmonogramem Produkcji",
+            text="Production Scheduling Management System",
             font=("Arial", 11, "italic"),
             fg="#bdc3c7",
             bg="#2c3e50",
@@ -226,12 +226,17 @@ class SplashScreen(tk.Toplevel):
 
         info_label = tk.Label(
             self,
-            text="Wersja 4.2 | Ładowanie zasobów...",
+            text="Version 4.2 | Loading resources...",
             font=("Arial", 9),
             fg="#ecf0f1",
             bg="#2c3e50",
         )
         info_label.pack(pady=(10, 0))
+
+        self.update_idletasks()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(50, lambda: self.attributes("-topmost", False))
 
         # Zaplanowanie zamknięcia planszy i wywołania głównego okna
         self.after(delay_ms, self.close_splash)
