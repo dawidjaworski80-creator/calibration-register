@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
@@ -115,18 +116,11 @@ class ListManagerDialog(tk.Toplevel):
             self.callback_on_update()  # Zapisuje i odświeża listy
 
 
-class ScheduleApp:
+class DataManager:
+    """Zarządza danymi aplikacji, ładowniem/zapisem JSON oraz filtracją danych."""
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Machine Shop Schedule Pro - Job Sub-parts /1 /2 /3")
-        self.root.geometry("1650x820")
-        self.root.configure(bg="#f4f4f9")
-
-        # Ścieżka bazy danych z pamięci podręcznej/pliku konfiguracyjnego
-        self.db_file_path = get_saved_db_path()
-
-        # Bazy danych w pamięci
+    def __init__(self, db_file_path):
+        self.db_file_path = db_file_path
         self.clients_db = set()
         self.machines_db = set()
         self.operators_db = set()
@@ -138,14 +132,136 @@ class ScheduleApp:
             "On Hold",
             "Ready For Milling",
         }
+        self.all_jobs_data = {}
+        self.mct_dir = ""
+        self.last_db_mtime = 0
+
+    def load_data(self):
+        if os.path.exists(self.db_file_path):
+            try:
+                with open(self.db_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.clients_db.update(data.get("clients", []))
+                    self.machines_db.update(data.get("machines", []))
+                    self.operators_db.update(data.get("operators", []))
+                    if "statuses" in data:
+                        self.status_db.update(data["statuses"])
+                    self.all_jobs_data = data.get("jobs", {})
+                    self.mct_dir = data.get("mct_dir", "")
+                    self.last_db_mtime = os.path.getmtime(self.db_file_path)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load database file:\n{str(e)}")
+
+    def save_data(self):
+        """Trwały i bezpieczny (atomiczny) zapis do pliku bazy JSON."""
+        data = {
+            "clients": sorted(list(self.clients_db)),
+            "machines": sorted(list(self.machines_db)),
+            "operators": sorted(list(self.operators_db)),
+            "statuses": sorted(list(self.status_db)),
+            "mct_dir": self.mct_dir,
+            "jobs": self.all_jobs_data,
+        }
+        try:
+            dir_name = os.path.dirname(self.db_file_path) or "."
+            os.makedirs(dir_name, exist_ok=True)
+
+            with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tf:
+                json.dump(data, tf, indent=4, ensure_ascii=False)
+                temp_name = tf.name
+
+            os.replace(temp_name, self.db_file_path)
+            self.last_db_mtime = os.path.getmtime(self.db_file_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to save database file:\n{str(e)}")
+
+
+class SplashScreen(tk.Toplevel):
+    """Plansza informacyjna (Splash Screen) wyświetlana przed główną aplikacją."""
+
+    def __init__(self, parent, delay_ms=3000):
+        super().__init__(parent)
+        self.parent = parent
+
+        # Tytuł okna
+        self.title("Machine Shop Schedule Pro - Start")
+
+        # Rozmiar okna
+        width = 500
+        height = 280
+
+        # Wyśrodkowanie okna na ekranie
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+        # Usunięcie obramowania okna
+        self.overrideredirect(True)
+
+        # Stylizacja i tło okna
+        self.configure(
+            bg="#2c3e50", highlightbackground="#34495e", highlightthickness=2
+        )
+
+        # Zawartość planszy informacyjnej
+        title_label = tk.Label(
+            self,
+            text="Machine Shop Schedule Pro",
+            font=("Arial", 18, "bold"),
+            fg="#ffffff",
+            bg="#2c3e50",
+        )
+        title_label.pack(pady=(40, 10))
+
+        subtitle_label = tk.Label(
+            self,
+            text="System Zarządzania Harmonogramem Produkcji",
+            font=("Arial", 11, "italic"),
+            fg="#bdc3c7",
+            bg="#2c3e50",
+        )
+        subtitle_label.pack(pady=(0, 20))
+
+        info_label = tk.Label(
+            self,
+            text="Wersja 4.2 | Ładowanie zasobów...",
+            font=("Arial", 9),
+            fg="#ecf0f1",
+            bg="#2c3e50",
+        )
+        info_label.pack(pady=(10, 0))
+
+        # Zaplanowanie zamknięcia planszy i wywołania głównego okna
+        self.after(delay_ms, self.close_splash)
+
+    def close_splash(self):
+        self.destroy()
+        self.parent.deiconify()  # Pokazuje główne okno aplikacji
+
+
+class ScheduleApp:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Machine Shop Schedule Pro - Job Sub-parts /1 /2 /3")
+        self.root.state("zoomed")
+        self.root.minsize(1200, 700)
+        self.root.configure(bg="#f4f4f9")
+
+        # Inicjalizacja menedżera danych
+        db_path = get_saved_db_path()
+        self.data_mgr = DataManager(db_path)
+
         self.priorities_db = ["Low", "Normal", "High", "URGENT"]
-        self.mct_dir = ""  # Katalog z certyfikatami MCT
 
         self.editing_job_id = None
         self.editing_sub_idx = None
         self.temp_sub_items = []
-
-        self.last_db_mtime = 0
+        
+        self.sort_column = None
+        self.sort_reverse = False
 
         # --- HEADER ---
         header_frame = tk.Frame(self.root, bg="#2c3e50", pady=12)
@@ -293,7 +409,7 @@ class ScheduleApp:
             client_container,
             text="📇",
             font=("Arial", 7),
-            command=lambda: self.open_list_manager("Clients", self.clients_db),
+            command=lambda: self.open_list_manager("Clients", self.data_mgr.clients_db),
         ).pack(side="left", padx=(2, 0))
 
         tk.Label(
@@ -344,7 +460,7 @@ class ScheduleApp:
             m_box,
             text="⚙️",
             font=("Arial", 7),
-            command=lambda: self.open_list_manager("Machines", self.machines_db),
+            command=lambda: self.open_list_manager("Machines", self.data_mgr.machines_db),
         ).pack(side="left", padx=1)
 
         tk.Label(sub_inputs, text="Operator:", bg="#eef2f7").grid(
@@ -358,7 +474,7 @@ class ScheduleApp:
             o_box,
             text="👤",
             font=("Arial", 7),
-            command=lambda: self.open_list_manager("Operators", self.operators_db),
+            command=lambda: self.open_list_manager("Operators", self.data_mgr.operators_db),
         ).pack(side="left", padx=1)
 
         tk.Label(sub_inputs, text="Qty:", bg="#eef2f7").grid(
@@ -395,7 +511,7 @@ class ScheduleApp:
             s_box,
             text="🔄",
             font=("Arial", 7),
-            command=lambda: self.open_list_manager("Statuses", self.status_db),
+            command=lambda: self.open_list_manager("Statuses", self.data_mgr.status_db),
         ).pack(side="left", padx=1)
 
         tk.Label(sub_inputs, text="MCT:", bg="#eef2f7").grid(
@@ -517,6 +633,7 @@ class ScheduleApp:
 
         self.columns = (
             "client",
+            "date",
             "job",
             "po",
             "sub_no",
@@ -525,7 +642,6 @@ class ScheduleApp:
             "operator",
             "qty",
             "priority",
-            "date",
             "status",
             "mct",
             "file",
@@ -534,11 +650,12 @@ class ScheduleApp:
             table_frame, columns=self.columns, show="tree headings", height=14
         )
 
-        self.tree.heading("#0", text=" Order Hierarchy ", anchor="w")
+        self.tree.heading("#0", text=" Order Hierarchy ", anchor="w", command=lambda: self.sort_tree_by_column("#0"))
         self.tree.column("#0", width=180, anchor="w")
 
         headers = {
             "client": "Client Name 📇",
+            "date": "Due Date 📅",
             "job": "Job No.",
             "po": "PO Number",
             "sub_no": "Item No.",
@@ -547,13 +664,13 @@ class ScheduleApp:
             "operator": "Operator 👤",
             "qty": "Qty",
             "priority": "Priority",
-            "date": "Due Date 📅",
             "status": "Status 🔄",
             "mct": "MCT 📜",
             "file": "Drawing / File",
         }
         widths = {
             "client": 140,
+            "date": 90,
             "job": 90,
             "po": 90,
             "sub_no": 90,
@@ -562,14 +679,13 @@ class ScheduleApp:
             "operator": 100,
             "qty": 50,
             "priority": 70,
-            "date": 90,
             "status": 110,
             "mct": 80,
             "file": 140,
         }
 
         for col in self.columns:
-            self.tree.heading(col, text=headers[col])
+            self.tree.heading(col, text=headers[col], command=lambda c=col: self.sort_tree_by_column(c))
             anchor = (
                 "center"
                 if col in ("job", "po", "sub_no", "qty", "priority", "date", "status", "mct")
@@ -589,6 +705,9 @@ class ScheduleApp:
         )
         self.tree.tag_configure(
             "finished", background="#d4edda", foreground="#155724"
+        )
+        self.tree.tag_configure(
+            "on_hold", background="#f5c16c", foreground="#7a3f00"
         )
         self.tree.tag_configure("separator", background="#e2e8f0", foreground="#e2e8f0")
 
@@ -613,9 +732,19 @@ class ScheduleApp:
         )
         btn_edit.pack(side="left", padx=3)
 
+        btn_duplicate = tk.Button(
+            action_frame,
+            text="📋 Duplicate Job",
+            bg="#d35400",
+            fg="white",
+            font=("Arial", 9, "bold"),
+            command=self.duplicate_selected_job,
+        )
+        btn_duplicate.pack(side="left", padx=3)
+
         btn_quick_assign = tk.Button(
             action_frame,
-            text="⚙️ / 👤 Quick Edit Machine/Operator",
+            text="⚙️ / 👤 / ⭐ Quick Edit",
             bg="#8e44ad",
             fg="white",
             font=("Arial", 9, "bold"),
@@ -676,22 +805,20 @@ class ScheduleApp:
         )
         self.lbl_stats.pack()
 
-        self.all_jobs_data = {}
         self.update_clock()
         self.load_data()
         self.check_file_updates()
 
     def check_file_updates(self):
         try:
-            if os.path.exists(self.db_file_path):
-                mtime = os.path.getmtime(self.db_file_path)
+            if os.path.exists(self.data_mgr.db_file_path):
+                mtime = os.path.getmtime(self.data_mgr.db_file_path)
                 if (
-                    self.last_db_mtime != 0
-                    and mtime > self.last_db_mtime
+                    self.data_mgr.last_db_mtime != 0
+                    and mtime > self.data_mgr.last_db_mtime
                     and self.editing_job_id is None
                 ):
                     self.load_data()
-                    self.last_db_mtime = mtime
         except Exception:
             pass
         self.root.after(5000, self.check_file_updates)
@@ -704,11 +831,28 @@ class ScheduleApp:
             if not item_id:
                 return
 
-            if column == "#12":
+            if column == "#12":  # MCT Column
                 self.open_selected_mct()
+                return
+            elif column == "#13":  # File Column
+                self.open_selected_file()
+                return
+            elif column == "#11":  # Status Column
+                self.open_status_change_dialog()
+                return
+            elif column in ("#5", "#6"):  # Item No / Part Name Column
+                self.start_edit_job()
                 return
 
         self.open_quick_assign_dialog()
+
+    def sort_tree_by_column(self, col):
+        if self.sort_column == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col
+            self.sort_reverse = False
+        self.refresh_tree()
 
     def open_app_settings_menu(self):
         settings_dialog = tk.Toplevel(self.root)
@@ -758,30 +902,30 @@ class ScheduleApp:
             title="Wybierz lub utwórz plik bazy danych JSON",
             defaultextension=".json",
             filetypes=[("Pliki JSON", "*.json"), ("Wszystkie pliki", "*.*")],
-            initialdir=os.path.dirname(self.db_file_path),
-            initialfile=os.path.basename(self.db_file_path),
+            initialdir=os.path.dirname(self.data_mgr.db_file_path),
+            initialfile=os.path.basename(self.data_mgr.db_file_path),
         )
         if file_path:
-            self.db_file_path = file_path
-            save_db_path(self.db_file_path)
-            if os.path.exists(self.db_file_path):
+            self.data_mgr.db_file_path = file_path
+            save_db_path(self.data_mgr.db_file_path)
+            if os.path.exists(self.data_mgr.db_file_path):
                 self.load_data()
             else:
                 self.save_data()
             messagebox.showinfo(
-                "Baza danych", f"Lokalizacja bazy danych zmieniona na:\n{self.db_file_path}"
+                "Baza danych", f"Lokalizacja bazy danych zmieniona na:\n{self.data_mgr.db_file_path}"
             )
 
     def select_mct_directory(self):
         folder = filedialog.askdirectory(
             title="Select MCT Certificates Folder",
-            initialdir=self.mct_dir if self.mct_dir else APP_DIR,
+            initialdir=self.data_mgr.mct_dir if self.data_mgr.mct_dir else APP_DIR,
         )
         if folder:
-            self.mct_dir = folder
+            self.data_mgr.mct_dir = folder
             self.save_data()
             messagebox.showinfo(
-                "MCT Directory Selected", f"MCT Directory set to:\n{self.mct_dir}"
+                "MCT Directory Selected", f"MCT Directory set to:\n{self.data_mgr.mct_dir}"
             )
 
     def open_selected_mct(self):
@@ -803,7 +947,7 @@ class ScheduleApp:
         job_no, idx_str = item_id.split("_")
         try:
             idx = int(idx_str)
-            sub_item = self.all_jobs_data[job_no]["sub_items"][idx]
+            sub_item = self.data_mgr.all_jobs_data[job_no]["sub_items"][idx]
             mct_val = sub_item.get("mct", "").strip()
         except (KeyError, IndexError, ValueError):
             messagebox.showerror("Error", "Could not retrieve item data.")
@@ -815,13 +959,13 @@ class ScheduleApp:
             )
             return
 
-        if not self.mct_dir or not os.path.exists(self.mct_dir):
+        if not self.data_mgr.mct_dir or not os.path.exists(self.data_mgr.mct_dir):
             if messagebox.askyesno(
                 "MCT Directory Not Set",
                 "MCT directory is not set or valid. Would you like to select the folder now?",
             ):
                 self.select_mct_directory()
-                if not self.mct_dir or not os.path.exists(self.mct_dir):
+                if not self.data_mgr.mct_dir or not os.path.exists(self.data_mgr.mct_dir):
                     return
             else:
                 return
@@ -829,7 +973,7 @@ class ScheduleApp:
         found_file = None
         mct_clean = os.path.splitext(mct_val)[0].strip().lower()
 
-        exact_path = os.path.join(self.mct_dir, mct_val)
+        exact_path = os.path.join(self.data_mgr.mct_dir, mct_val)
         if os.path.exists(exact_path) and os.path.isfile(exact_path):
             found_file = exact_path
         else:
@@ -846,17 +990,17 @@ class ScheduleApp:
                 ".txt",
             ]
             for ext in extensions:
-                test_path = os.path.join(self.mct_dir, mct_val + ext)
+                test_path = os.path.join(self.data_mgr.mct_dir, mct_val + ext)
                 if os.path.exists(test_path):
                     found_file = test_path
                     break
 
         if not found_file:
             try:
-                all_files = os.listdir(self.mct_dir)
+                all_files = os.listdir(self.data_mgr.mct_dir)
                 for f in all_files:
                     if mct_clean in f.lower():
-                        found_file = os.path.join(self.mct_dir, f)
+                        found_file = os.path.join(self.data_mgr.mct_dir, f)
                         break
             except Exception as e:
                 messagebox.showerror("Error", f"Error scanning MCT directory:\n{str(e)}")
@@ -877,7 +1021,7 @@ class ScheduleApp:
         else:
             messagebox.showwarning(
                 "Certificate Not Found",
-                f"Could not find a certificate matching '{mct_val}' in folder:\n{self.mct_dir}",
+                f"Could not find a certificate matching '{mct_val}' in folder:\n{self.data_mgr.mct_dir}",
             )
 
     def open_lists_manager_menu(self):
@@ -899,7 +1043,7 @@ class ScheduleApp:
             width=22,
             command=lambda: [
                 menu_dialog.destroy(),
-                self.open_list_manager("Clients", self.clients_db),
+                self.open_list_manager("Clients", self.data_mgr.clients_db),
             ],
         ).pack(pady=4)
 
@@ -909,7 +1053,7 @@ class ScheduleApp:
             width=22,
             command=lambda: [
                 menu_dialog.destroy(),
-                self.open_list_manager("Machines", self.machines_db),
+                self.open_list_manager("Machines", self.data_mgr.machines_db),
             ],
         ).pack(pady=4)
 
@@ -919,7 +1063,7 @@ class ScheduleApp:
             width=22,
             command=lambda: [
                 menu_dialog.destroy(),
-                self.open_list_manager("Operators", self.operators_db),
+                self.open_list_manager("Operators", self.data_mgr.operators_db),
             ],
         ).pack(pady=4)
 
@@ -929,7 +1073,7 @@ class ScheduleApp:
             width=22,
             command=lambda: [
                 menu_dialog.destroy(),
-                self.open_list_manager("Statuses", self.status_db),
+                self.open_list_manager("Statuses", self.data_mgr.status_db),
             ],
         ).pack(pady=4)
 
@@ -940,10 +1084,10 @@ class ScheduleApp:
 
     def update_all_comboboxes(self):
         """Aktualizuje listy wyboru oraz natychmiast zapisuje dane do JSON."""
-        clients_sorted = sorted(list(self.clients_db))
-        machines_sorted = sorted(list(self.machines_db))
-        operators_sorted = sorted(list(self.operators_db))
-        statuses_sorted = sorted(list(self.status_db))
+        clients_sorted = sorted(list(self.data_mgr.clients_db))
+        machines_sorted = sorted(list(self.data_mgr.machines_db))
+        operators_sorted = sorted(list(self.data_mgr.operators_db))
+        statuses_sorted = sorted(list(self.data_mgr.status_db))
 
         self.combo_client["values"] = clients_sorted
         self.sub_combo_machine["values"] = machines_sorted
@@ -960,44 +1104,19 @@ class ScheduleApp:
         self.root.after(1000, self.update_clock)
 
     def load_data(self):
-        if os.path.exists(self.db_file_path):
-            try:
-                with open(self.db_file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Łączenie obecnych wartości z zapisanymi w bazie
-                    self.clients_db.update(data.get("clients", []))
-                    self.machines_db.update(data.get("machines", []))
-                    self.operators_db.update(data.get("operators", []))
-                    if "statuses" in data:
-                        self.status_db.update(data["statuses"])
-                    self.all_jobs_data = data.get("jobs", {})
-                    self.mct_dir = data.get("mct_dir", "")
-                    self.last_db_mtime = os.path.getmtime(self.db_file_path)
-            except Exception as e:
-                messagebox.showerror(
-                    "Error", f"Failed to load database file:\n{str(e)}"
-                )
+        try:
+            self.data_mgr.load_data()
+        except RuntimeError as e:
+            messagebox.showerror("Error", str(e))
         self.update_all_comboboxes()
         self.refresh_tree()
 
     def save_data(self):
-        """Trwały zapis do pliku bazy JSON."""
-        data = {
-            "clients": sorted(list(self.clients_db)),
-            "machines": sorted(list(self.machines_db)),
-            "operators": sorted(list(self.operators_db)),
-            "statuses": sorted(list(self.status_db)),
-            "mct_dir": self.mct_dir,
-            "jobs": self.all_jobs_data,
-        }
+        """Trwały zapis do pliku bazy JSON za pomocą DataManager."""
         try:
-            os.makedirs(os.path.dirname(self.db_file_path), exist_ok=True)
-            with open(self.db_file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            if os.path.exists(self.db_file_path):
-                self.last_db_mtime = os.path.getmtime(self.db_file_path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save database file:\n{str(e)}")
+            self.data_mgr.save_data()
+        except RuntimeError as e:
+            messagebox.showerror("Error", str(e))
 
     def open_add_form(self):
         self.clear_form()
@@ -1055,22 +1174,27 @@ class ScheduleApp:
             messagebox.showwarning("Warning", "Part Name is required!")
             return
 
+        qty_str = self.sub_entry_qty.get().strip()
+        if not qty_str.isdigit() or int(qty_str) <= 0:
+            messagebox.showwarning("Warning", "Quantity (Qty) must be a positive integer!")
+            return
+
         m_val = self.sub_combo_machine.get().strip()
         o_val = self.sub_combo_operator.get().strip()
         s_val = self.sub_combo_status.get().strip() or "In Progress"
 
         if m_val:
-            self.machines_db.add(m_val)
+            self.data_mgr.machines_db.add(m_val)
         if o_val:
-            self.operators_db.add(o_val)
+            self.data_mgr.operators_db.add(o_val)
         if s_val:
-            self.status_db.add(s_val)
+            self.data_mgr.status_db.add(s_val)
 
         sub_item_data = {
             "name": name,
             "machine": m_val,
             "operator": o_val,
-            "qty": self.sub_entry_qty.get().strip() or "1",
+            "qty": qty_str,
             "priority": self.sub_combo_priority.get(),
             "date": self.sub_entry_date.get_date().strftime("%Y-%m-%d"),
             "status": s_val,
@@ -1145,6 +1269,8 @@ class ScheduleApp:
         sel = self.sub_tree.selection()
         if not sel:
             return
+        if not messagebox.askyesno("Confirm Delete", "Are you sure you want to remove this sub-part?"):
+            return
         idx = int(sel[0])
         del self.temp_sub_items[idx]
         self.update_sub_item_numbers()
@@ -1167,22 +1293,22 @@ class ScheduleApp:
             )
             return
 
-        if self.editing_job_id is None and job_no in self.all_jobs_data:
+        if self.editing_job_id is None and job_no in self.data_mgr.all_jobs_data:
             messagebox.showerror(
                 "Error", f"Job Number '{job_no}' already exists!"
             )
             return
 
-        self.clients_db.add(client)
+        self.data_mgr.clients_db.add(client)
         for it in self.temp_sub_items:
             if it["machine"]:
-                self.machines_db.add(it["machine"])
+                self.data_mgr.machines_db.add(it["machine"])
             if it["operator"]:
-                self.operators_db.add(it["operator"])
+                self.data_mgr.operators_db.add(it["operator"])
             if it["status"]:
-                self.status_db.add(it["status"])
+                self.data_mgr.status_db.add(it["status"])
 
-        self.all_jobs_data[job_no] = {
+        self.data_mgr.all_jobs_data[job_no] = {
             "client": client,
             "po": po,
             "sub_items": self.temp_sub_items,
@@ -1204,10 +1330,10 @@ class ScheduleApp:
         else:
             job_no = item_id
 
-        if job_no not in self.all_jobs_data:
+        if job_no not in self.data_mgr.all_jobs_data:
             return
 
-        job_data = self.all_jobs_data[job_no]
+        job_data = self.data_mgr.all_jobs_data[job_no]
         self.open_add_form()
         self.editing_job_id = job_no
 
@@ -1217,6 +1343,35 @@ class ScheduleApp:
         self.entry_po.insert(0, job_data["po"])
 
         self.temp_sub_items = [dict(it) for it in job_data["sub_items"]]
+        self.refresh_sub_tree()
+
+    def duplicate_selected_job(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Information", "Please select a Job or Sub-part to duplicate.")
+            return
+
+        item_id = sel[0]
+        job_no = item_id.split("_")[0] if "_" in item_id else item_id
+
+        if job_no not in self.data_mgr.all_jobs_data:
+            return
+
+        orig_data = self.data_mgr.all_jobs_data[job_no]
+        new_job_no = f"{job_no}_COPY"
+
+        self.open_add_form()
+        self.combo_client.set(orig_data["client"])
+        self.entry_job.insert(0, new_job_no)
+        self.entry_po.insert(0, orig_data["po"])
+
+        copied_subs = []
+        for idx, it in enumerate(orig_data["sub_items"], 1):
+            c_it = dict(it)
+            c_it["sub_no"] = f"{new_job_no}/{idx}"
+            copied_subs.append(c_it)
+
+        self.temp_sub_items = copied_subs
         self.refresh_sub_tree()
 
     def delete_selected(self):
@@ -1234,18 +1389,18 @@ class ScheduleApp:
             if "_" in item_id:
                 job_no, idx_str = item_id.split("_")
                 idx = int(idx_str)
-                if job_no in self.all_jobs_data:
-                    sub_list = self.all_jobs_data[job_no]["sub_items"]
+                if job_no in self.data_mgr.all_jobs_data:
+                    sub_list = self.data_mgr.all_jobs_data[job_no]["sub_items"]
                     if 0 <= idx < len(sub_list):
                         del sub_list[idx]
                         if not sub_list:
-                            del self.all_jobs_data[job_no]
+                            del self.data_mgr.all_jobs_data[job_no]
                         else:
                             for i, it in enumerate(sub_list, 1):
                                 it["sub_no"] = f"{job_no}/{i}"
             else:
-                if item_id in self.all_jobs_data:
-                    del self.all_jobs_data[item_id]
+                if item_id in self.data_mgr.all_jobs_data:
+                    del self.data_mgr.all_jobs_data[item_id]
 
         self.save_data()
         self.refresh_tree()
@@ -1262,7 +1417,23 @@ class ScheduleApp:
         status_counts = {}
         today_str = datetime.now().strftime("%Y-%m-%d")
 
-        for job_no, job_data in sorted(self.all_jobs_data.items()):
+        sorted_jobs = list(self.data_mgr.all_jobs_data.items())
+
+        # Sortowanie według wybranej kolumny jeśli włączone
+        if self.sort_column:
+            col = self.sort_column
+            def get_sort_key(item):
+                job_no, job_data = item
+                if col in ("client", "po", "job", "#0"):
+                    val = job_data.get(col, job_no)
+                else:
+                    # Dla pod-elementów bierzemy wartość z pierwszego elementu
+                    subs = job_data.get("sub_items", [])
+                    val = subs[0].get(col, "") if subs else ""
+                return str(val).lower()
+            sorted_jobs.sort(key=get_sort_key, reverse=self.sort_reverse)
+
+        for job_no, job_data in sorted_jobs:
             client = job_data["client"]
             po = job_data["po"]
             sub_items = job_data["sub_items"]
@@ -1282,17 +1453,23 @@ class ScheduleApp:
                 matching_subs.append((idx, it))
 
             if matching_subs:
+                has_high_priority = any(
+                    str(it.get("priority", "")).strip().lower() == "high"
+                    for _, it in matching_subs
+                )
+                parent_text = f"⭐ 📦 Order: {job_no}" if has_high_priority else f"📦 Order: {job_no}"
+
                 parent_node = self.tree.insert(
                     "",
                     "end",
                     iid=job_no,
-                    text=f"📦 Order: {job_no}",
+                    text=parent_text,
                     values=(
                         client,
+                        "",
                         job_no,
                         po,
                         f"({len(matching_subs)} sub-parts)",
-                        "—",
                         "—",
                         "—",
                         "—",
@@ -1310,12 +1487,15 @@ class ScheduleApp:
                     child_id = f"{job_no}_{idx}"
                     st = it["status"]
                     tags = []
+                    st_norm = str(st).strip().lower()
 
-                    if st == "Finished":
+                    if st_norm == "on hold":
+                        tags.append("on_hold")
+                    elif st_norm == "finished":
                         tags.append("finished")
-                    elif st == "Sub Con":
+                    elif st_norm == "sub con":
                         tags.append("sub_con")
-                    elif it["date"] < today_str and st != "Finished":
+                    elif it["date"] < today_str and st_norm != "finished":
                         tags.append("overdue")
 
                     self.tree.insert(
@@ -1325,6 +1505,7 @@ class ScheduleApp:
                         text=f"  📄 {it['sub_no']}",
                         values=(
                             "",
+                            it["date"],
                             "",
                             "",
                             it["sub_no"],
@@ -1333,7 +1514,6 @@ class ScheduleApp:
                             it["operator"],
                             it["qty"],
                             it["priority"],
-                            it["date"],
                             it["status"],
                             it.get("mct", ""),
                             os.path.basename(it["file"]) if it["file"] else "",
@@ -1378,7 +1558,7 @@ class ScheduleApp:
 
         job_no, idx_str = item_id.split("_")
         idx = int(idx_str)
-        f_path = self.all_jobs_data[job_no]["sub_items"][idx]["file"]
+        f_path = self.data_mgr.all_jobs_data[job_no]["sub_items"][idx]["file"]
 
         if f_path and os.path.exists(f_path):
             try:
@@ -1406,21 +1586,25 @@ class ScheduleApp:
 
         if is_full_job:
             job_no = item_id
-            sub_items = self.all_jobs_data[job_no]["sub_items"]
-            title_txt = f"Quick Assign ALL Sub-parts in {job_no}"
+            sub_items = self.data_mgr.all_jobs_data[job_no]["sub_items"]
+            title_txt = f"Quick Edit ALL Sub-parts in {job_no}"
             init_m = sub_items[0]["machine"] if sub_items else ""
             init_o = sub_items[0]["operator"] if sub_items else ""
+            init_p = sub_items[0]["priority"] if sub_items else "Normal"
+            init_mct = sub_items[0].get("mct", "") if sub_items else ""
         else:
             job_no, idx_str = item_id.split("_")
             idx = int(idx_str)
-            sub_item = self.all_jobs_data[job_no]["sub_items"][idx]
-            title_txt = f"Quick Assign: {sub_item['sub_no']}"
+            sub_item = self.data_mgr.all_jobs_data[job_no]["sub_items"][idx]
+            title_txt = f"Quick Edit: {sub_item['sub_no']}"
             init_m = sub_item["machine"]
             init_o = sub_item["operator"]
+            init_p = sub_item["priority"]
+            init_mct = sub_item.get("mct", "")
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Quick Assign Machine & Operator")
-        dlg.geometry("320x190")
+        dlg.title("Quick Edit Machine / Operator / Priority / MCT")
+        dlg.geometry("360x290")
         dlg.resizable(False, False)
         dlg.grab_set()
 
@@ -1433,35 +1617,53 @@ class ScheduleApp:
 
         tk.Label(f_inputs, text="Machine:").grid(row=0, column=0, sticky="w", pady=4)
         c_m = ttk.Combobox(
-            f_inputs, values=sorted(list(self.machines_db)), width=16
+            f_inputs, values=sorted(list(self.data_mgr.machines_db)), width=16
         )
         c_m.grid(row=0, column=1, padx=5, pady=4)
         c_m.set(init_m)
 
         tk.Label(f_inputs, text="Operator:").grid(row=1, column=0, sticky="w", pady=4)
         c_o = ttk.Combobox(
-            f_inputs, values=sorted(list(self.operators_db)), width=16
+            f_inputs, values=sorted(list(self.data_mgr.operators_db)), width=16
         )
         c_o.grid(row=1, column=1, padx=5, pady=4)
         c_o.set(init_o)
 
+        tk.Label(f_inputs, text="Priority:").grid(row=2, column=0, sticky="w", pady=4)
+        c_p = ttk.Combobox(
+            f_inputs, values=self.priorities_db, state="readonly", width=16
+        )
+        c_p.grid(row=2, column=1, padx=5, pady=4)
+        c_p.set(init_p)
+
+        tk.Label(f_inputs, text="MCT:").grid(row=3, column=0, sticky="w", pady=4)
+        c_mct = tk.Entry(f_inputs, width=18)
+        c_mct.grid(row=3, column=1, padx=5, pady=4)
+        c_mct.insert(0, init_mct)
+
         def save_quick():
             m_val = c_m.get().strip()
             o_val = c_o.get().strip()
+            p_val = c_p.get().strip()
+            mct_val = c_mct.get().strip()
             if m_val:
-                self.machines_db.add(m_val)
+                self.data_mgr.machines_db.add(m_val)
             if o_val:
-                self.operators_db.add(o_val)
+                self.data_mgr.operators_db.add(o_val)
 
             if is_full_job:
-                for sub in self.all_jobs_data[job_no]["sub_items"]:
+                for sub in self.data_mgr.all_jobs_data[job_no]["sub_items"]:
                     sub["machine"] = m_val
                     sub["operator"] = o_val
+                    sub["priority"] = p_val
+                    sub["mct"] = mct_val
             else:
                 sub_item["machine"] = m_val
                 sub_item["operator"] = o_val
+                sub_item["priority"] = p_val
+                sub_item["mct"] = mct_val
 
-            self.update_all_comboboxes()  # Wywołanie automatycznego zapisu do pliku
+            self.update_all_comboboxes()
             self.refresh_tree()
             dlg.destroy()
 
@@ -1480,35 +1682,39 @@ class ScheduleApp:
             messagebox.showinfo("Information", "Please select a Sub-part row first.")
             return
 
-        item_id = sel[0]
-        if "_" not in item_id:
-            messagebox.showinfo("Information", "Please select a specific Sub-part row.")
-            return
+        selected_sub_items = []
+        for item_id in sel:
+            if "_" in item_id:
+                job_no, idx_str = item_id.split("_")
+                idx = int(idx_str)
+                selected_sub_items.append(self.data_mgr.all_jobs_data[job_no]["sub_items"][idx])
 
-        job_no, idx_str = item_id.split("_")
-        idx = int(idx_str)
-        sub_item = self.all_jobs_data[job_no]["sub_items"][idx]
+        if not selected_sub_items:
+            messagebox.showinfo("Information", "Please select specific Sub-part row(s).")
+            return
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Change Status")
-        dlg.geometry("280x140")
+        dlg.geometry("300x140")
         dlg.resizable(False, False)
         dlg.grab_set()
 
+        lbl_text = f"Change Status for {len(selected_sub_items)} selected Sub-part(s)"
         tk.Label(
-            dlg, text=f"Change Status for {sub_item['sub_no']}", font=("Arial", 10, "bold")
+            dlg, text=lbl_text, font=("Arial", 10, "bold")
         ).pack(pady=10)
 
-        c_s = ttk.Combobox(dlg, values=sorted(list(self.status_db)), width=18)
+        c_s = ttk.Combobox(dlg, values=sorted(list(self.data_mgr.status_db)), width=18)
         c_s.pack(pady=5)
-        c_s.set(sub_item["status"])
+        c_s.set(selected_sub_items[0]["status"])
 
         def save_st():
             s_val = c_s.get().strip()
             if s_val:
-                self.status_db.add(s_val)
-                sub_item["status"] = s_val
-                self.update_all_comboboxes()  # Wywołanie automatycznego zapisu do pliku
+                self.data_mgr.status_db.add(s_val)
+                for sub in selected_sub_items:
+                    sub["status"] = s_val
+                self.update_all_comboboxes()
                 self.refresh_tree()
             dlg.destroy()
 
@@ -1534,6 +1740,7 @@ class ScheduleApp:
                     writer.writerow(
                         [
                             "Client",
+                            "Due Date",
                             "Job No",
                             "PO Number",
                             "Sub-part No",
@@ -1542,18 +1749,18 @@ class ScheduleApp:
                             "Operator",
                             "Qty",
                             "Priority",
-                            "Due Date",
                             "Status",
                             "MCT",
                             "File Path",
                         ]
                     )
 
-                    for job_num, job_data in self.all_jobs_data.items():
+                    for job_num, job_data in self.data_mgr.all_jobs_data.items():
                         for it in job_data["sub_items"]:
                             writer.writerow(
                                 [
                                     job_data["client"],
+                                    it["date"],
                                     job_num,
                                     job_data["po"],
                                     it["sub_no"],
@@ -1562,7 +1769,6 @@ class ScheduleApp:
                                     it["operator"],
                                     it["qty"],
                                     it["priority"],
-                                    it["date"],
                                     it["status"],
                                     it.get("mct", ""),
                                     it["file"],
@@ -1579,5 +1785,12 @@ class ScheduleApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
+    root.state("zoomed")
+
+    # Pokazujemy planszę informacyjną przez 3000 ms (3 sekundy)
+    splash = SplashScreen(root, delay_ms=3000)
+
+    # Inicjalizacja aplikacji
     app = ScheduleApp(root)
+
     root.mainloop()

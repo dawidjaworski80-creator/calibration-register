@@ -1,0 +1,15 @@
+{
+    "clients": [],
+    "machines": [],
+    "operators": [],
+    "statuses": [
+        "Finished",
+        "In Progress",
+        "Inspection",
+        "On Hold",
+        "Ready For Milling",
+        "Sub Con"
+    ],
+    "mct_dir": "",
+    "jobs": {}
+}
