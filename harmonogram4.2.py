@@ -141,99 +141,7 @@ class ListManagerDialog(tk.Toplevel):
         btn_del.pack(fill="x", padx=10, pady=(0, 10))
 
         self.refresh_list()
-
-    def refresh_list(self):
-        self.listbox.delete(0, tk.END)
-        for item in sorted(list(self.item_set)):
-            self.listbox.insert(tk.END, item)
-
-        # Bind selection to populate color entry when applicable
-        if self.title_name.lower() == "statuses":
-            self.listbox.bind("<<ListboxSelect>>", self.on_select)
-
-    def add_item(self):
-        name = self.entry_item.get().strip()
-        if name:
-            formatted_name = (
-                name if self.title_name.lower() == "statuses" else name.title()
-            )
-            # If status already exists, update its color instead of duplicating
-            if self.title_name.lower() == "statuses" and formatted_name in self.item_set:
-                color = getattr(self, 'color_entry', None)
-                chosen = color.get().strip() if color else ""
-                if not chosen:
-                    chosen = self.color_map.get(formatted_name, "")
-                if chosen:
-                    self.color_map[formatted_name] = chosen
-            else:
-                self.item_set.add(formatted_name)
-                # If managing statuses, also record color for new item
-                if self.title_name.lower() == "statuses":
-                    color = getattr(self, 'color_entry', None)
-                    chosen = color.get().strip() if color else ""
-                    if chosen:
-                        self.color_map[formatted_name] = chosen
-            self.entry_item.delete(0, tk.END)
-            self.refresh_list()
-            self.callback_on_update()  # Zapisuje i odświeża listy
-
-    def delete_item(self):
-        sel = self.listbox.curselection()
-        if sel:
-            display = self.listbox.get(sel[0])
-            # Extract name (strip possible ' [#hex]')
-            item = display.split()[0]
-            # If statuses, try to match full name ignoring appended color
-            if self.title_name.lower() == "statuses":
-                # listbox shows 'Name    [#hex]' so split by '    '
-                parts = display.split('    ')
-                item = parts[0]
-
-            if item in self.item_set:
-                self.item_set.remove(item)
-            # remove color mapping too
-            if self.title_name.lower() == "statuses" and item in self.color_map:
-                del self.color_map[item]
-            self.refresh_list()
-            self.callback_on_update()  # Zapisuje i odświeża listy
-
-    def pick_color(self):
-        c = colorchooser.askcolor(title="Choose status color")
-        if c and c[1]:
-            self.color_entry.delete(0, tk.END)
-            self.color_entry.insert(0, c[1])
-            if hasattr(self, "color_preview"):
-                self.color_preview.config(bg=c[1])
-
-    def update_color(self):
-        # Update color for the selected status (or for name in entry)
-        sel = self.listbox.curselection()
-        if sel:
-            display = self.listbox.get(sel[0])
-            parts = display.split('    ')
-            name = parts[0]
-        else:
-            name = self.entry_item.get().strip()
-
-        if not name:
-            messagebox.showwarning("Warning", "No status selected or entered to update color.")
-            return
-
-        chosen = getattr(self, 'color_entry', None)
-        color_val = chosen.get().strip() if chosen else ""
-        if not color_val:
-            messagebox.showwarning("Warning", "No color selected.")
-            return
-
-        # Ensure item exists in set
-        if name not in self.item_set:
-            # create it if not exist
-            self.item_set.add(name)
-
-        # assign color
-        self.color_map[name] = color_val
-        self.refresh_list()
-        self.callback_on_update()
+        
 
     def on_select(self, event):
         sel = self.listbox.curselection()
@@ -2296,6 +2204,83 @@ class ScheduleApp:
                 "Export Error", f"Failed to export data:\n{str(e)}"
             )
 
+    def show_column_mapping_dialog(self, headers, targets):
+        """Show a dialog allowing the user to map worksheet headers to target fields.
+
+        Returns a dict mapping each target -> selected header name (or empty string).
+        Returns None if the user cancels.
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Map Excel Columns")
+        dlg.geometry("680x420")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg,
+            text="Map columns from the Excel file to application fields:",
+            font=("Arial", 10, "bold"),
+        ).pack(pady=(8, 6), padx=8, anchor="w")
+
+        frame = tk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+
+        left = tk.Frame(frame)
+        left.pack(side="left", fill="both", expand=True)
+        right = tk.Frame(frame, width=240)
+        right.pack(side="right", fill="y", padx=(8,0))
+
+        # Show detected headers on the right for clarity
+        tk.Label(right, text="Detected headers:", font=("Arial", 9, "bold")).pack(anchor="nw", pady=(2,4))
+        lb_frame = tk.Frame(right)
+        lb_frame.pack(fill="both", expand=True)
+        header_listbox = tk.Listbox(lb_frame, height=18, activestyle="none")
+        header_scroll = ttk.Scrollbar(lb_frame, orient="vertical", command=header_listbox.yview)
+        header_listbox.configure(yscrollcommand=header_scroll.set)
+        header_listbox.pack(side="left", fill="both", expand=True)
+        header_scroll.pack(side="right", fill="y")
+        for h in headers:
+            header_listbox.insert(tk.END, h)
+
+        entries = {}
+        for i, key in enumerate(targets):
+            lbl = tk.Label(left, text=key.title() + ":", anchor="w")
+            lbl.grid(row=i, column=0, sticky="w", padx=4, pady=3)
+            cb = ttk.Combobox(left, values=headers, state="readonly", width=60)
+            cb.grid(row=i, column=1, sticky="w", padx=4, pady=3)
+            # try to preselect a reasonable match
+            sel = ""
+            for h in headers:
+                if key in h.lower():
+                    sel = h
+                    break
+            if sel:
+                cb.set(sel)
+            entries[key] = cb
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(fill="x", pady=(6, 10), padx=8)
+
+        result = {}
+
+        def on_ok():
+            for k, comb in entries.items():
+                v = comb.get().strip()
+                result[k] = v if v else ""
+            dlg.destroy()
+
+        def on_cancel():
+            result.clear()
+            dlg.destroy()
+
+        tk.Button(btn_frame, text="OK", width=10, command=on_ok).pack(side="right", padx=6)
+        tk.Button(btn_frame, text="Cancel", width=10, command=on_cancel).pack(side="right")
+
+        dlg.wait_window()
+        if not result:
+            return None
+        return result
+
     def import_from_excel(self):
         if load_workbook is None:
             messagebox.showerror(
@@ -2318,14 +2303,26 @@ class ScheduleApp:
         try:
             wb = load_workbook(filename, data_only=True)
             ws = wb.active
-            header_row = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
-            header_map = {
-                h.lower(): idx
-                for idx, h in enumerate(header_row)
-                if h
-            }
+            # Try to detect the header row among the first 10 rows (take the row with most non-empty cells)
+            best_row = None
+            best_count = -1
+            for r in range(1, min(11, ws.max_row + 1)):
+                row_cells = ws[r]
+                row_vals = [str(cell.value).strip() if cell.value is not None else "" for cell in row_cells]
+                non_empty = sum(1 for v in row_vals if v)
+                if non_empty > best_count:
+                    best_count = non_empty
+                    best_row = row_vals
+            if not best_row or best_count == 0:
+                messagebox.showerror(
+                    "Import Error",
+                    "Could not detect header row in Excel file. Make sure headers are in the first rows.",
+                )
+                return
+            header_row = best_row
 
-            expected_headers = {
+            # Fields we will ask the user to map
+            targets = [
                 "client",
                 "due date",
                 "job no",
@@ -2339,12 +2336,27 @@ class ScheduleApp:
                 "status",
                 "mct",
                 "file path",
-            }
-            if not expected_headers.issubset(set(header_map.keys())):
+            ]
+
+            mapping = self.show_column_mapping_dialog(header_row, targets)
+            if mapping is None:
+                return
+
+            # build header_map: target -> index
+            header_map = {}
+            for key, header_name in mapping.items():
+                if header_name:
+                    try:
+                        idx = header_row.index(header_name)
+                        header_map[key] = idx
+                    except ValueError:
+                        # header not found, ignore
+                        pass
+
+            if "job no" not in header_map:
                 messagebox.showerror(
                     "Import Error",
-                    "Excel file must contain all expected headers: "
-                    + ", ".join(sorted(expected_headers)),
+                    "You must map the 'Job No' column to import data.",
                 )
                 return
 
@@ -2355,7 +2367,7 @@ class ScheduleApp:
 
                 def val(name):
                     idx = header_map.get(name)
-                    return row[idx] if idx is not None else ""
+                    return row[idx] if idx is not None and idx < len(row) else ""
 
                 client = str(val("client")).strip()
                 job_no = str(val("job no")).strip()
