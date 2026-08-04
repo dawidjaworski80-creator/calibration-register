@@ -6,7 +6,7 @@ import sys
 import tempfile
 import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, colorchooser
 from tkcalendar import DateEntry
 
 # Sprawdzenie ścieżki uruchomienia aplikacji
@@ -45,7 +45,7 @@ def save_db_path(path):
 class ListManagerDialog(tk.Toplevel):
     """Uniwersalne okno dialogowe do zarządzania listami (Klienci, Maszyny, Operatorzy, Statusy)"""
 
-    def __init__(self, parent, title_name, item_set, callback_on_update):
+    def __init__(self, parent, title_name, item_set, callback_on_update, color_map=None):
         super().__init__(parent)
         self.title(f"Manage {title_name}")
         self.geometry("360x320")
@@ -55,6 +55,7 @@ class ListManagerDialog(tk.Toplevel):
         self.title_name = title_name
         self.item_set = item_set
         self.callback_on_update = callback_on_update
+        self.color_map = color_map or {}
 
         tk.Label(
             self, text=f"Manage {title_name} List", font=("Arial", 11, "bold")
@@ -66,6 +67,17 @@ class ListManagerDialog(tk.Toplevel):
         self.entry_item = tk.Entry(input_frame, width=20)
         self.entry_item.pack(side="left", padx=(0, 5), expand=True, fill="x")
 
+        # Color selector for Statuses
+        if self.title_name.lower() == "statuses":
+            self.color_entry = tk.Entry(input_frame, width=10)
+            self.color_entry.pack(side="left", padx=(4, 0))
+            tk.Button(
+                input_frame,
+                text="Pick",
+                font=("Arial", 7),
+                command=self.pick_color,
+            ).pack(side="left", padx=(2, 0))
+
         btn_add = tk.Button(
             input_frame,
             text="Add",
@@ -75,6 +87,18 @@ class ListManagerDialog(tk.Toplevel):
             command=self.add_item,
         )
         btn_add.pack(side="right")
+
+        # Update Color button for statuses
+        if self.title_name.lower() == "statuses":
+            btn_update = tk.Button(
+                input_frame,
+                text="Update Color",
+                bg="#f39c12",
+                fg="white",
+                font=("Arial", 8, "bold"),
+                command=self.update_color,
+            )
+            btn_update.pack(side="right", padx=(4, 2))
 
         self.listbox = tk.Listbox(self, font=("Arial", 9))
         self.listbox.pack(fill="both", expand=True, padx=10, pady=5)
@@ -94,7 +118,16 @@ class ListManagerDialog(tk.Toplevel):
     def refresh_list(self):
         self.listbox.delete(0, tk.END)
         for item in sorted(list(self.item_set)):
-            self.listbox.insert(tk.END, item)
+            if self.title_name.lower() == "statuses":
+                color = self.color_map.get(item, "")
+                display = f"{item}    [{color}]" if color else item
+            else:
+                display = item
+            self.listbox.insert(tk.END, display)
+
+        # Bind selection to populate color entry when applicable
+        if self.title_name.lower() == "statuses":
+            self.listbox.bind("<<ListboxSelect>>", self.on_select)
 
     def add_item(self):
         name = self.entry_item.get().strip()
@@ -102,7 +135,22 @@ class ListManagerDialog(tk.Toplevel):
             formatted_name = (
                 name if self.title_name.lower() == "statuses" else name.title()
             )
-            self.item_set.add(formatted_name)
+            # If status already exists, update its color instead of duplicating
+            if self.title_name.lower() == "statuses" and formatted_name in self.item_set:
+                color = getattr(self, 'color_entry', None)
+                chosen = color.get().strip() if color else ""
+                if not chosen:
+                    chosen = self.color_map.get(formatted_name, "")
+                if chosen:
+                    self.color_map[formatted_name] = chosen
+            else:
+                self.item_set.add(formatted_name)
+                # If managing statuses, also record color for new item
+                if self.title_name.lower() == "statuses":
+                    color = getattr(self, 'color_entry', None)
+                    chosen = color.get().strip() if color else ""
+                    if chosen:
+                        self.color_map[formatted_name] = chosen
             self.entry_item.delete(0, tk.END)
             self.refresh_list()
             self.callback_on_update()  # Zapisuje i odświeża listy
@@ -110,10 +158,69 @@ class ListManagerDialog(tk.Toplevel):
     def delete_item(self):
         sel = self.listbox.curselection()
         if sel:
-            item = self.listbox.get(sel[0])
-            self.item_set.remove(item)
+            display = self.listbox.get(sel[0])
+            # Extract name (strip possible ' [#hex]')
+            item = display.split()[0]
+            # If statuses, try to match full name ignoring appended color
+            if self.title_name.lower() == "statuses":
+                # listbox shows 'Name    [#hex]' so split by '    '
+                parts = display.split('    ')
+                item = parts[0]
+
+            if item in self.item_set:
+                self.item_set.remove(item)
+            # remove color mapping too
+            if self.title_name.lower() == "statuses" and item in self.color_map:
+                del self.color_map[item]
             self.refresh_list()
             self.callback_on_update()  # Zapisuje i odświeża listy
+
+    def pick_color(self):
+        c = colorchooser.askcolor(title="Choose status color")
+        if c and c[1]:
+            self.color_entry.delete(0, tk.END)
+            self.color_entry.insert(0, c[1])
+
+    def update_color(self):
+        # Update color for the selected status (or for name in entry)
+        sel = self.listbox.curselection()
+        if sel:
+            display = self.listbox.get(sel[0])
+            parts = display.split('    ')
+            name = parts[0]
+        else:
+            name = self.entry_item.get().strip()
+
+        if not name:
+            messagebox.showwarning("Warning", "No status selected or entered to update color.")
+            return
+
+        chosen = getattr(self, 'color_entry', None)
+        color_val = chosen.get().strip() if chosen else ""
+        if not color_val:
+            messagebox.showwarning("Warning", "No color selected.")
+            return
+
+        # Ensure item exists in set
+        if name not in self.item_set:
+            # create it if not exist
+            self.item_set.add(name)
+
+        # assign color
+        self.color_map[name] = color_val
+        self.refresh_list()
+        self.callback_on_update()
+
+    def on_select(self, event):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        display = self.listbox.get(sel[0])
+        parts = display.split('    ')
+        name = parts[0]
+        color = self.color_map.get(name, "")
+        self.color_entry.delete(0, tk.END)
+        self.color_entry.insert(0, color)
 
 
 class DataManager:
@@ -132,6 +239,15 @@ class DataManager:
             "On Hold",
             "Ready For Milling",
         }
+        # Mapping status -> color hex (strings). Keys are case-sensitive as displayed.
+        self.status_colors = {
+            "In Progress": "#e7f3ff",
+            "Sub Con": "#fff3cd",
+            "Finished": "#d4edda",
+            "Inspection": "#f0e6ff",
+            "On Hold": "#f5c16c",
+            "Ready For Milling": "#e6fffa",
+        }
         self.all_jobs_data = {}
         self.mct_dir = ""
         self.last_db_mtime = 0
@@ -144,8 +260,21 @@ class DataManager:
                     self.clients_db.update(data.get("clients", []))
                     self.machines_db.update(data.get("machines", []))
                     self.operators_db.update(data.get("operators", []))
+                    # support both old list-of-statuses and new dict-of-color mappings
                     if "statuses" in data:
-                        self.status_db.update(data["statuses"])
+                        s = data["statuses"]
+                        if isinstance(s, dict):
+                            # statuses stored as {name: color}
+                            self.status_db.update(s.keys())
+                            # merge colors
+                            for k, v in s.items():
+                                self.status_colors[k] = v
+                        else:
+                            self.status_db.update(s)
+                    # legacy separate status_colors key
+                    if "status_colors" in data and isinstance(data["status_colors"], dict):
+                        for k, v in data["status_colors"].items():
+                            self.status_colors[k] = v
                     self.all_jobs_data = data.get("jobs", {})
                     self._normalize_dates_in_data()
                     self.mct_dir = data.get("mct_dir", "")
@@ -177,7 +306,8 @@ class DataManager:
             "clients": sorted(list(self.clients_db)),
             "machines": sorted(list(self.machines_db)),
             "operators": sorted(list(self.operators_db)),
-            "statuses": sorted(list(self.status_db)),
+            # store statuses as dict mapping -> color so colors persist
+            "statuses": {s: self.status_colors.get(s, "") for s in sorted(list(self.status_db))},
             "mct_dir": self.mct_dir,
             "jobs": self.all_jobs_data,
         }
@@ -588,6 +718,26 @@ class ScheduleApp:
         )
         self.btn_save_sub.grid(row=1, column=10, padx=5)
 
+        # Enable Enter key to move focus to the next input field while adding a new job/sub-part
+        try:
+            self.combo_client.bind("<Return>", lambda e: self.entry_job.focus_set())
+            self.entry_job.bind("<Return>", lambda e: self.entry_po.focus_set())
+            self.entry_po.bind("<Return>", lambda e: self.sub_entry_name.focus_set())
+
+            self.sub_entry_name.bind("<Return>", lambda e: self.sub_combo_machine.focus_set())
+            self.sub_combo_machine.bind("<Return>", lambda e: self.sub_combo_operator.focus_set())
+            self.sub_combo_operator.bind("<Return>", lambda e: self.sub_entry_qty.focus_set())
+            self.sub_entry_qty.bind("<Return>", lambda e: self.sub_combo_priority.focus_set())
+            self.sub_combo_priority.bind("<Return>", lambda e: self.sub_entry_date.focus_set())
+            self.sub_entry_date.bind("<Return>", lambda e: self.sub_combo_status.focus_set())
+            self.sub_combo_status.bind("<Return>", lambda e: self.sub_entry_mct.focus_set())
+            self.sub_entry_mct.bind("<Return>", lambda e: self.sub_entry_file.focus_set())
+            self.sub_entry_file.bind("<Return>", lambda e: self.btn_save_sub.focus_set())
+            self.btn_save_sub.bind("<Return>", lambda e: self.add_or_update_sub_item())
+        except Exception:
+            # Fail silently if any widget isn't present for some reason
+            pass
+
         self.sub_tree = ttk.Treeview(
             sub_frame,
             columns=(
@@ -744,18 +894,9 @@ class ScheduleApp:
         self.tree.bind("<Double-1>", self.on_double_click_row)
 
         self.tree.tag_configure("job_header", font=("Arial", 9, "bold"))
-        self.tree.tag_configure(
-            "overdue", background="#f8d7da", foreground="#721c24"
-        )
-        self.tree.tag_configure(
-            "sub_con", background="#fff3cd", foreground="#856404"
-        )
-        self.tree.tag_configure(
-            "finished", background="#d4edda", foreground="#155724"
-        )
-        self.tree.tag_configure(
-            "on_hold", background="#f5c16c", foreground="#7a3f00"
-        )
+
+        # Special tags (status tags configured dynamically later)
+        self.tree.tag_configure("overdue", background="#f8d7da", foreground="#721c24")
         self.tree.tag_configure("separator", background="#e2e8f0", foreground="#e2e8f0")
 
         scrollbar = ttk.Scrollbar(
@@ -1156,9 +1297,18 @@ class ScheduleApp:
         ).pack(pady=4)
 
     def open_list_manager(self, title_name, item_set):
-        ListManagerDialog(
-            self.root, title_name, item_set, self.update_all_comboboxes
-        )
+        if title_name.lower() == "statuses":
+            ListManagerDialog(
+                self.root,
+                title_name,
+                item_set,
+                self.update_all_comboboxes,
+                color_map=self.data_mgr.status_colors,
+            )
+        else:
+            ListManagerDialog(
+                self.root, title_name, item_set, self.update_all_comboboxes
+            )
 
     def update_all_comboboxes(self):
         """Aktualizuje listy wyboru oraz natychmiast zapisuje dane do JSON."""
@@ -1175,7 +1325,35 @@ class ScheduleApp:
         self.combo_filter_machine["values"] = ["All"] + machines_sorted
         self.combo_filter_status["values"] = ["All"] + statuses_sorted
         self.combo_filter_client["values"] = ["All"] + clients_sorted
+        # Reconfigure status tags/colors from persisted map and save
+        try:
+            self.configure_status_tags()
+        except Exception:
+            pass
         self.save_data()
+
+    def configure_status_tags(self):
+        """Configure Treeview tags for statuses using colors from DataManager."""
+        # Start with any existing mapping from data_mgr
+        merged = dict(self.data_mgr.status_colors or {})
+
+        # Ensure every status exists in mapping (default to white background if missing)
+        for s in self.data_mgr.status_db:
+            if s not in merged:
+                merged[s] = "#ffffff"
+
+        # Save to instance and configure tags
+        self.status_color_map = {}
+        for s, col in merged.items():
+            s_norm = str(s).strip().lower()
+            tag_name = f"status_{s_norm.replace(' ', '_')}"
+            bg = col or "#ffffff"
+            fg = "#000000"
+            try:
+                self.tree.tag_configure(tag_name, background=bg, foreground=fg)
+            except Exception:
+                pass
+            self.status_color_map[s_norm] = (bg, fg)
 
     def update_clock(self):
         now = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
@@ -1589,14 +1767,17 @@ class ScheduleApp:
                     tags = []
                     st_norm = str(st).strip().lower()
 
-                    if st_norm == "on hold":
-                        tags.append("on_hold")
-                    elif st_norm == "finished":
-                        tags.append("finished")
-                    elif st_norm == "sub con":
-                        tags.append("sub_con")
-                    elif it["date"] < today_str and st_norm != "finished":
-                        tags.append("overdue")
+                    # Add tag for known status colors
+                    status_tag = f"status_{st_norm.replace(' ', '_')}"
+                    if st_norm in getattr(self, 'status_color_map', {}):
+                        tags.append(status_tag)
+
+                    # Mark overdue items (unless finished)
+                    try:
+                        if it["date"] < today_str and st_norm != "finished":
+                            tags.append("overdue")
+                    except Exception:
+                        pass
 
                     self.tree.insert(
                         parent_node,
