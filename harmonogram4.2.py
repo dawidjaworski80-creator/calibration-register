@@ -492,6 +492,18 @@ class ScheduleApp:
         )
         btn_refresh.pack(side="left", padx=(0, 5))
 
+        btn_reminders = tk.Button(
+            top_bar,
+            text="🔔 Reminders",
+            bg="#d35400",
+            fg="white",
+            font=("Arial", 9, "bold"),
+            padx=8,
+            pady=4,
+            command=self.open_reminder_window,
+        )
+        btn_reminders.pack(side="left", padx=(0, 5))
+
         btn_app_settings = tk.Button(
             top_bar,
             text="⚙️ App Settings",
@@ -1055,6 +1067,8 @@ class ScheduleApp:
 
             today = datetime.now().date()
             reminder_window = today + timedelta(days=2)
+            due_soon_items = []
+            overdue_items = []
             for job_no, job_data in self.data_mgr.all_jobs_data.items():
                 for item in job_data.get("sub_items", []):
                     try:
@@ -1063,18 +1077,136 @@ class ScheduleApp:
                         continue
                     if item.get("status", "") == "Finished":
                         continue
-                    if due_date <= reminder_window and due_date >= today:
-                        reminder_key = f"{job_no}:{item['sub_no']}"
-                        if not reminded_dates.get(reminder_key, False):
-                            reminded_dates[reminder_key] = True
-                            client_name = job_data.get("client", "") or ""
-                            messagebox.showwarning(
-                                "Reminder",
-                                f"Due soon: {job_no} / {item['sub_no']}\nClient: {client_name}\nDue date: {item['date']}",
-                            )
+                    if due_date < today:
+                        overdue_items.append((job_no, job_data, item))
+                    elif due_date <= reminder_window:
+                        due_soon_items.append((job_no, job_data, item))
+
+            if overdue_items or due_soon_items:
+                self.show_due_date_reminder_window(overdue_items, due_soon_items)
+                for job_no, job_data, item in due_soon_items + overdue_items:
+                    reminder_key = f"{job_no}:{item['sub_no']}"
+                    reminded_dates[reminder_key] = True
         except Exception:
             pass
         self.root.after(60000, self.check_due_date_reminders)
+
+    def open_reminder_window(self):
+        overdue_items = []
+        due_soon_items = []
+        today = datetime.now().date()
+        reminder_window = today + timedelta(days=2)
+        for job_no, job_data in self.data_mgr.all_jobs_data.items():
+            for item in job_data.get("sub_items", []):
+                try:
+                    due_date = datetime.strptime(item.get("date", ""), "%d-%m-%Y").date()
+                except Exception:
+                    continue
+                if item.get("status", "") == "Finished":
+                    continue
+                if due_date < today:
+                    overdue_items.append((job_no, job_data, item))
+                elif due_date <= reminder_window:
+                    due_soon_items.append((job_no, job_data, item))
+
+        self.show_due_date_reminder_window(overdue_items, due_soon_items)
+
+    def show_due_date_reminder_window(self, overdue_items, due_soon_items):
+        items = []
+        for job_no, job_data, item in overdue_items:
+            items.append(("Overdue", job_no, job_data, item))
+        for job_no, job_data, item in due_soon_items:
+            items.append(("Due soon", job_no, job_data, item))
+
+        if not items:
+            return
+
+        reminder_window = tk.Toplevel(self.root)
+        reminder_window.title("Schedule Reminders")
+        reminder_window.geometry("980x420")
+        reminder_window.minsize(860, 380)
+        reminder_window.transient(self.root)
+        reminder_window.grab_set()
+        reminder_window.configure(bg="#f8f9fa")
+
+        tk.Label(
+            reminder_window,
+            text="Schedule Reminder",
+            font=("Arial", 14, "bold"),
+            bg="#f8f9fa",
+        ).pack(pady=(12, 6))
+
+        tk.Label(
+            reminder_window,
+            text="Below are overdue and due-soon sub-parts. Review the schedule and update any items as needed.",
+            font=("Arial", 10),
+            bg="#f8f9fa",
+        ).pack(pady=(0, 10))
+
+        tree_frame = tk.Frame(reminder_window, bg="#f8f9fa")
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        columns = ("section", "client", "po", "job", "subpart", "date")
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        tree.heading("section", text="Section")
+        tree.heading("client", text="Client")
+        tree.heading("po", text="PO")
+        tree.heading("job", text="Job")
+        tree.heading("subpart", text="Sub-part")
+        tree.heading("date", text="Due Date")
+        tree.column("section", width=110, anchor="center")
+        tree.column("client", width=240, anchor="w")
+        tree.column("po", width=150, anchor="w")
+        tree.column("job", width=120, anchor="center")
+        tree.column("subpart", width=120, anchor="center")
+        tree.column("date", width=120, anchor="center")
+        tree.tag_configure("Overdue", background="#f8d7da")
+        tree.tag_configure("Due soon", background="#fff3cd")
+
+        for section, job_no, job_data, item in items:
+            tree.insert(
+                "",
+                tk.END,
+                values=(
+                    section,
+                    job_data.get("client", ""),
+                    job_data.get("po", ""),
+                    job_no,
+                    item.get("sub_no", ""),
+                    item.get("date", ""),
+                ),
+                tags=(section,),
+            )
+
+        tree.pack(fill="both", expand=True, side="left")
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        footer_frame = tk.Frame(reminder_window, bg="#f8f9fa")
+        footer_frame.pack(fill="x", padx=12, pady=(0, 12))
+
+        tk.Label(
+            footer_frame,
+            text=f"Overdue: {len(overdue_items)}   |   Due soon: {len(due_soon_items)}",
+            font=("Arial", 10, "bold"),
+            bg="#f8f9fa",
+        ).pack(side="left")
+
+        tk.Button(
+            footer_frame,
+            text="Close",
+            bg="#2980b9",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            width=12,
+            command=reminder_window.destroy,
+        ).pack(side="right")
 
     def on_double_click_row(self, event=None):
         if event:
