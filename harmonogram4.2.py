@@ -9,6 +9,25 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk, colorchooser
 from tkcalendar import DateEntry
 
+try:
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+except ImportError:
+    Workbook = None
+    load_workbook = None
+    Alignment = None
+    Font = None
+    PatternFill = None
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+except ImportError:
+    Workbook = None
+    Alignment = None
+    Font = None
+    PatternFill = None
+
 # Sprawdzenie ścieżki uruchomienia aplikacji
 if getattr(sys, "frozen", False):
     APP_DIR = os.path.dirname(sys.executable)
@@ -77,6 +96,14 @@ class ListManagerDialog(tk.Toplevel):
                 font=("Arial", 7),
                 command=self.pick_color,
             ).pack(side="left", padx=(2, 0))
+            self.color_preview = tk.Label(
+                input_frame,
+                width=2,
+                bg="#ffffff",
+                relief="solid",
+                borderwidth=1,
+            )
+            self.color_preview.pack(side="left", padx=(4, 0))
 
         btn_add = tk.Button(
             input_frame,
@@ -118,12 +145,7 @@ class ListManagerDialog(tk.Toplevel):
     def refresh_list(self):
         self.listbox.delete(0, tk.END)
         for item in sorted(list(self.item_set)):
-            if self.title_name.lower() == "statuses":
-                color = self.color_map.get(item, "")
-                display = f"{item}    [{color}]" if color else item
-            else:
-                display = item
-            self.listbox.insert(tk.END, display)
+            self.listbox.insert(tk.END, item)
 
         # Bind selection to populate color entry when applicable
         if self.title_name.lower() == "statuses":
@@ -180,6 +202,8 @@ class ListManagerDialog(tk.Toplevel):
         if c and c[1]:
             self.color_entry.delete(0, tk.END)
             self.color_entry.insert(0, c[1])
+            if hasattr(self, "color_preview"):
+                self.color_preview.config(bg=c[1])
 
     def update_color(self):
         # Update color for the selected status (or for name in entry)
@@ -215,12 +239,12 @@ class ListManagerDialog(tk.Toplevel):
         sel = self.listbox.curselection()
         if not sel:
             return
-        display = self.listbox.get(sel[0])
-        parts = display.split('    ')
-        name = parts[0]
+        name = self.listbox.get(sel[0])
         color = self.color_map.get(name, "")
         self.color_entry.delete(0, tk.END)
         self.color_entry.insert(0, color)
+        if hasattr(self, "color_preview"):
+            self.color_preview.config(bg=color if color else "#ffffff")
 
 
 class DataManager:
@@ -549,13 +573,23 @@ class ScheduleApp:
         )
         btn_reset_filters.pack(side="left")
 
+        btn_import = tk.Button(
+            top_bar,
+            text="📥 Import from Excel",
+            bg="#16a085",
+            fg="white",
+            font=("Arial", 9, "bold"),
+            command=self.import_from_excel,
+        )
+        btn_import.pack(side="right", padx=(0, 5))
+
         btn_export = tk.Button(
             top_bar,
-            text="📊 Export to CSV",
+            text="📊 Export to Excel",
             bg="#8e44ad",
             fg="white",
             font=("Arial", 9, "bold"),
-            command=self.export_to_csv,
+            command=self.export_to_excel,
         )
         btn_export.pack(side="right")
 
@@ -2010,60 +2044,268 @@ class ScheduleApp:
             command=save_st,
         ).pack(pady=10)
 
-    def export_to_csv(self):
+    def export_to_excel(self):
+        if Workbook is None:
+            messagebox.showerror(
+                "Export Error",
+                "Excel export is unavailable because openpyxl is not installed.",
+            )
+            return
+
         filename = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            title="Export Schedule Data to CSV",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            title="Export Schedule Data to Excel",
         )
-        if filename:
-            try:
-                with open(filename, "w", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(
+        if not filename:
+            return
+
+        headers = [
+            "Client",
+            "Due Date",
+            "Job No",
+            "PO Number",
+            "Sub-part No",
+            "Part Name",
+            "Machine",
+            "Operator",
+            "Qty",
+            "Priority",
+            "Status",
+            "MCT",
+            "File Path",
+        ]
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Schedule"
+            ws.append(headers)
+
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill("solid", fgColor="4B0082")
+            header_alignment = Alignment(horizontal="center", vertical="center")
+
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+
+            status_fill_map = {
+                st.lower(): color.replace("#", "")
+                for st, color in self.data_mgr.status_colors.items()
+                if color
+            }
+            row_alignment = Alignment(vertical="center", wrap_text=True)
+
+            for job_num, job_data in self.data_mgr.all_jobs_data.items():
+                for it in job_data["sub_items"]:
+                    due_date = None
+                    try:
+                        due_date = datetime.strptime(it["date"], "%d-%m-%Y").date()
+                    except Exception:
+                        due_date = it["date"]
+
+                    ws.append(
                         [
-                            "Client",
-                            "Due Date",
-                            "Job No",
-                            "PO Number",
-                            "Sub-part No",
-                            "Part Name",
-                            "Machine",
-                            "Operator",
-                            "Qty",
-                            "Priority",
-                            "Status",
-                            "MCT",
-                            "File Path",
+                            job_data["client"],
+                            due_date,
+                            job_num,
+                            job_data["po"],
+                            it["sub_no"],
+                            it["name"],
+                            it["machine"],
+                            it["operator"],
+                            it["qty"],
+                            it["priority"],
+                            it["status"],
+                            it.get("mct", ""),
+                            it["file"],
                         ]
                     )
+                    current_row = ws.max_row
+                    status_key = str(it.get("status", "")).strip().lower()
+                    fill_color = status_fill_map.get(status_key)
+                    if fill_color:
+                        row_fill = PatternFill(fill_type="solid", fgColor=fill_color)
+                        for col_idx in range(1, len(headers) + 1):
+                            cell = ws.cell(row=current_row, column=col_idx)
+                            cell.fill = row_fill
 
-                    for job_num, job_data in self.data_mgr.all_jobs_data.items():
-                        for it in job_data["sub_items"]:
-                            writer.writerow(
-                                [
-                                    job_data["client"],
-                                    it["date"],
-                                    job_num,
-                                    job_data["po"],
-                                    it["sub_no"],
-                                    it["name"],
-                                    it["machine"],
-                                    it["operator"],
-                                    it["qty"],
-                                    it["priority"],
-                                    it["status"],
-                                    it.get("mct", ""),
-                                    it["file"],
-                                ]
-                            )
-                messagebox.showinfo(
-                    "Export Successful", f"Data exported successfully to:\n{filename}"
-                )
-            except Exception as e:
+            ws.freeze_panes = ws["A2"]
+            ws.auto_filter.ref = ws.dimensions
+
+            # Auto-fit columns and apply row alignment
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    if cell.row == 1:
+                        cell.alignment = header_alignment
+                    else:
+                        cell.alignment = row_alignment
+
+                    value = cell.value
+                    if value is None:
+                        continue
+                    cell_length = len(str(value))
+                    if cell_length > max_length:
+                        max_length = cell_length
+                adjusted_width = min(max_length + 3, 60)
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            wb.save(filename)
+            messagebox.showinfo(
+                "Export Successful", f"Data exported successfully to:\n{filename}"
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Export Error", f"Failed to export data:\n{str(e)}"
+            )
+
+    def import_from_excel(self):
+        if load_workbook is None:
+            messagebox.showerror(
+                "Import Error",
+                "Excel import is unavailable because openpyxl is not installed.",
+            )
+            return
+
+        filename = filedialog.askopenfilename(
+            defaultextension=".xlsx",
+            filetypes=[
+                ("Excel files", "*.xlsx;*.xlsm;*.xltx;*.xltm"),
+                ("All files", "*.*"),
+            ],
+            title="Import Schedule Data from Excel",
+        )
+        if not filename:
+            return
+
+        try:
+            wb = load_workbook(filename, data_only=True)
+            ws = wb.active
+            header_row = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+            header_map = {
+                h.lower(): idx
+                for idx, h in enumerate(header_row)
+                if h
+            }
+
+            expected_headers = {
+                "client",
+                "due date",
+                "job no",
+                "po number",
+                "sub-part no",
+                "part name",
+                "machine",
+                "operator",
+                "qty",
+                "priority",
+                "status",
+                "mct",
+                "file path",
+            }
+            if not expected_headers.issubset(set(header_map.keys())):
                 messagebox.showerror(
-                    "Export Error", f"Failed to export data:\n{str(e)}"
+                    "Import Error",
+                    "Excel file must contain all expected headers: "
+                    + ", ".join(sorted(expected_headers)),
                 )
+                return
+
+            imported_rows = 0
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row):
+                    continue
+
+                def val(name):
+                    idx = header_map.get(name)
+                    return row[idx] if idx is not None else ""
+
+                client = str(val("client")).strip()
+                job_no = str(val("job no")).strip()
+                po = str(val("po number")).strip()
+                sub_no = str(val("sub-part no")).strip()
+                part_name = str(val("part name")).strip()
+                machine = str(val("machine")).strip()
+                operator = str(val("operator")).strip()
+                qty = val("qty")
+                priority = str(val("priority")).strip()
+                status = str(val("status")).strip()
+                mct = str(val("mct")).strip()
+                file_path = str(val("file path")).strip()
+
+                if not job_no:
+                    continue
+
+                due_date_val = val("due date")
+                due_date = ""
+                if isinstance(due_date_val, (datetime,)):
+                    due_date = due_date_val.strftime("%d-%m-%Y")
+                elif due_date_val is not None:
+                    due_date = str(due_date_val).strip()
+
+                if job_no not in self.data_mgr.all_jobs_data:
+                    self.data_mgr.all_jobs_data[job_no] = {
+                        "client": client,
+                        "po": po,
+                        "sub_items": [],
+                    }
+                else:
+                    existing_job = self.data_mgr.all_jobs_data[job_no]
+                    if client:
+                        existing_job["client"] = client
+                    if po:
+                        existing_job["po"] = po
+
+                sub_item = {
+                    "sub_no": sub_no or f"{job_no}/1",
+                    "name": part_name,
+                    "machine": machine,
+                    "operator": operator,
+                    "qty": qty if qty is not None else "",
+                    "priority": priority,
+                    "date": due_date,
+                    "status": status,
+                    "mct": mct,
+                    "file": file_path,
+                }
+
+                job_data = self.data_mgr.all_jobs_data[job_no]
+                existing_subs = {it["sub_no"]: it for it in job_data.get("sub_items", [])}
+                if sub_item["sub_no"] in existing_subs:
+                    existing_subs[sub_item["sub_no"]].update(sub_item)
+                else:
+                    job_data.setdefault("sub_items", []).append(sub_item)
+
+                if client:
+                    self.data_mgr.clients_db.add(client)
+                if machine:
+                    self.data_mgr.machines_db.add(machine)
+                if operator:
+                    self.data_mgr.operators_db.add(operator)
+                if status:
+                    self.data_mgr.status_db.add(status)
+                    if status not in self.data_mgr.status_colors:
+                        self.data_mgr.status_colors[status] = "#ffffff"
+
+                imported_rows += 1
+
+            self.update_all_comboboxes()
+            self.save_data()
+            self.refresh_tree()
+            messagebox.showinfo(
+                "Import Successful",
+                f"Imported {imported_rows} rows from Excel file."
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Import Error",
+                f"Failed to import Excel data:\n{str(e)}",
+            )
 
 
 if __name__ == "__main__":

@@ -1,14 +1,33 @@
 {
-    "clients": [],
-    "machines": [],
-    "operators": [],
+    "clients": [
+        "Brimmond",
+        "Nov",
+        "Oilenco",
+        "Phuel",
+        "Reservoir",
+        "Wellv",
+        "Wellvene",
+        "Wellvention",
+        "wellvene"
+    ],
+    "machines": [
+        "350L",
+        "Integrex",
+        "—"
+    ],
+    "operators": [
+        "Damian Biesek",
+        "Dawid Jaworski",
+        "—"
+    ],
     "statuses": [
         "Finished",
         "In Progress",
         "Inspection",
         "On Hold",
         "Ready For Milling",
-        "Sub Con"
+        "Sub Con",
+        "TO DO"
     ],
     "mct_dir": "",
     "jobs": {}
