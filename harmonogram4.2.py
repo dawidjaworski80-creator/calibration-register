@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from tkcalendar import DateEntry
 
@@ -147,10 +147,29 @@ class DataManager:
                     if "statuses" in data:
                         self.status_db.update(data["statuses"])
                     self.all_jobs_data = data.get("jobs", {})
+                    self._normalize_dates_in_data()
                     self.mct_dir = data.get("mct_dir", "")
                     self.last_db_mtime = os.path.getmtime(self.db_file_path)
             except Exception as e:
                 raise RuntimeError(f"Failed to load database file:\n{str(e)}")
+
+    def _normalize_dates_in_data(self):
+        def parse_date(value):
+            if not value:
+                return None
+            for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    return datetime.strptime(value, fmt).date()
+                except Exception:
+                    continue
+            return None
+
+        for job_data in self.all_jobs_data.values():
+            for item in job_data.get("sub_items", []):
+                raw_date = item.get("date", "")
+                parsed = parse_date(raw_date)
+                if parsed:
+                    item["date"] = parsed.strftime("%d-%m-%Y")
 
     def save_data(self):
         """Trwały i bezpieczny (atomiczny) zapis do pliku bazy JSON."""
@@ -264,8 +283,9 @@ class ScheduleApp:
         self.editing_job_id = None
         self.editing_sub_idx = None
         self.temp_sub_items = []
+        self._reminded_dates = {}
         
-        self.sort_column = None
+        self.sort_column = "date"
         self.sort_reverse = False
 
         # --- HEADER ---
@@ -362,10 +382,32 @@ class ScheduleApp:
         self.combo_filter_status = ttk.Combobox(
             top_bar, textvariable=self.filter_status_var, state="readonly", width=12
         )
-        self.combo_filter_status.pack(side="left", padx=(0, 15))
+        self.combo_filter_status.pack(side="left", padx=(0, 10))
         self.combo_filter_status.bind(
             "<<ComboboxSelected>>", lambda e: self.apply_filters()
         )
+
+        tk.Label(
+            top_bar, text="Filter Client:", font=("Arial", 9, "bold"), bg="#e2e8f0"
+        ).pack(side="left", padx=(5, 2))
+        self.filter_client_var = tk.StringVar(value="All")
+        self.combo_filter_client = ttk.Combobox(
+            top_bar, textvariable=self.filter_client_var, state="readonly", width=16
+        )
+        self.combo_filter_client.pack(side="left", padx=(0, 10))
+        self.combo_filter_client.bind(
+            "<<ComboboxSelected>>", lambda e: self.apply_filters()
+        )
+
+        tk.Label(
+            top_bar, text="Due Date:", font=("Arial", 9, "bold"), bg="#e2e8f0"
+        ).pack(side="left", padx=(5, 2))
+        self.filter_date_var = tk.StringVar()
+        self.entry_filter_date = tk.Entry(
+            top_bar, textvariable=self.filter_date_var, width=10, font=("Arial", 9)
+        )
+        self.entry_filter_date.pack(side="left", padx=(0, 10))
+        self.entry_filter_date.bind("<Return>", lambda e: self.apply_filters())
 
         btn_reset_filters = tk.Button(
             top_bar,
@@ -501,7 +543,7 @@ class ScheduleApp:
             row=1, column=2, sticky="w"
         )
         self.sub_entry_date = DateEntry(
-            sub_inputs, width=11, date_pattern="yyyy-mm-dd", locale="en_US"
+            sub_inputs, width=11, date_pattern="dd-mm-yyyy", locale="en_US"
         )
         self.sub_entry_date.grid(row=1, column=3, padx=2)
 
@@ -813,6 +855,7 @@ class ScheduleApp:
         self.update_clock()
         self.load_data()
         self.check_file_updates()
+        self.check_due_date_reminders()
 
     def check_file_updates(self):
         try:
@@ -827,6 +870,36 @@ class ScheduleApp:
         except Exception:
             pass
         self.root.after(5000, self.check_file_updates)
+
+    def check_due_date_reminders(self):
+        try:
+            reminded_dates = getattr(self, "_reminded_dates", None)
+            if reminded_dates is None:
+                reminded_dates = {}
+                self._reminded_dates = reminded_dates
+
+            today = datetime.now().date()
+            reminder_window = today + timedelta(days=2)
+            for job_no, job_data in self.data_mgr.all_jobs_data.items():
+                for item in job_data.get("sub_items", []):
+                    try:
+                        due_date = datetime.strptime(item.get("date", ""), "%d-%m-%Y").date()
+                    except Exception:
+                        continue
+                    if item.get("status", "") == "Finished":
+                        continue
+                    if due_date <= reminder_window and due_date >= today:
+                        reminder_key = f"{job_no}:{item['sub_no']}"
+                        if not reminded_dates.get(reminder_key, False):
+                            reminded_dates[reminder_key] = True
+                            client_name = job_data.get("client", "") or ""
+                            messagebox.showwarning(
+                                "Reminder",
+                                f"Due soon: {job_no} / {item['sub_no']}\nClient: {client_name}\nDue date: {item['date']}",
+                            )
+        except Exception:
+            pass
+        self.root.after(60000, self.check_due_date_reminders)
 
     def on_double_click_row(self, event=None):
         if event:
@@ -1101,10 +1174,11 @@ class ScheduleApp:
 
         self.combo_filter_machine["values"] = ["All"] + machines_sorted
         self.combo_filter_status["values"] = ["All"] + statuses_sorted
+        self.combo_filter_client["values"] = ["All"] + clients_sorted
         self.save_data()
 
     def update_clock(self):
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         self.clock_label.config(text=now)
         self.root.after(1000, self.update_clock)
 
@@ -1128,6 +1202,7 @@ class ScheduleApp:
         self.editing_job_id = None
         self.btn_toggle_form.config(state="disabled")
         self.form_frame.pack(fill="x", padx=15, pady=5, before=self.tree.master)
+        self._reminded_dates = getattr(self, "_reminded_dates", {})
 
     def hide_form(self):
         self.form_frame.pack_forget()
@@ -1201,7 +1276,7 @@ class ScheduleApp:
             "operator": o_val,
             "qty": qty_str,
             "priority": self.sub_combo_priority.get(),
-            "date": self.sub_entry_date.get_date().strftime("%Y-%m-%d"),
+            "date": self.sub_entry_date.get_date().strftime("%d-%m-%Y"),
             "status": s_val,
             "mct": self.sub_entry_mct.get().strip(),
             "file": self.sub_entry_file.get().strip(),
@@ -1215,6 +1290,7 @@ class ScheduleApp:
             self.temp_sub_items.append(sub_item_data)
 
         self.update_all_comboboxes()
+        self.save_data()
         self.clear_sub_inputs()
         self.refresh_sub_tree()
 
@@ -1257,7 +1333,7 @@ class ScheduleApp:
         self.sub_combo_priority.set(it["priority"])
 
         try:
-            d_obj = datetime.strptime(it["date"], "%Y-%m-%d")
+            d_obj = datetime.strptime(it["date"], "%d-%m-%Y")
             self.sub_entry_date.set_date(d_obj)
         except Exception:
             pass
@@ -1320,6 +1396,7 @@ class ScheduleApp:
         }
 
         self.update_all_comboboxes()
+        self.save_data()
         self.hide_form()
         self.refresh_tree()
 
@@ -1417,10 +1494,12 @@ class ScheduleApp:
         search_q = self.search_var.get().strip().lower()
         f_machine = self.filter_machine_var.get()
         f_status = self.filter_status_var.get()
+        f_client = self.filter_client_var.get()
+        f_date = self.filter_date_var.get().strip()
 
         total_sub_items = 0
         status_counts = {}
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = datetime.now().strftime("%d-%m-%Y")
 
         sorted_jobs = list(self.data_mgr.all_jobs_data.items())
 
@@ -1429,10 +1508,22 @@ class ScheduleApp:
             col = self.sort_column
             def get_sort_key(item):
                 job_no, job_data = item
+                if col == "date":
+                    subs = job_data.get("sub_items", [])
+                    if subs:
+                        # Sortuj po najwcześniejszej dacie z podzadań
+                        dates = []
+                        for sub in subs:
+                            try:
+                                dates.append(datetime.strptime(sub.get("date", ""), "%d-%m-%Y").date())
+                            except Exception:
+                                continue
+                        if dates:
+                            return min(dates)
+                    return datetime.max.date()
                 if col in ("client", "po", "job", "#0"):
                     val = job_data.get(col, job_no)
                 else:
-                    # Dla pod-elementów bierzemy wartość z pierwszego elementu
                     subs = job_data.get("sub_items", [])
                     val = subs[0].get(col, "") if subs else ""
                 return str(val).lower()
@@ -1448,6 +1539,10 @@ class ScheduleApp:
                 if f_machine != "All" and it["machine"] != f_machine:
                     continue
                 if f_status != "All" and it["status"] != f_status:
+                    continue
+                if f_client != "All" and client != f_client:
+                    continue
+                if f_date and it["date"] != f_date:
                     continue
 
                 if search_q:
@@ -1548,6 +1643,8 @@ class ScheduleApp:
         self.search_var.set("")
         self.filter_machine_var.set("All")
         self.filter_status_var.set("All")
+        self.filter_client_var.set("All")
+        self.filter_date_var.set("")
         self.refresh_tree()
 
     def open_selected_file(self):
