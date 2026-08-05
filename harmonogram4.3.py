@@ -1,3 +1,4 @@
+import calendar
 import csv
 import json
 import os
@@ -24,15 +25,26 @@ except ImportError:
     PatternFill = None
 
 if DateEntry is None:
-    class DateEntry(tk.Entry):
+    class DateEntry(tk.Frame):
         def __init__(self, parent, *args, **kwargs):
             self.date_pattern = kwargs.pop("date_pattern", "dd-mm-yyyy")
             self.locale = kwargs.pop("locale", None)
+            width = kwargs.pop("width", 11)
             super().__init__(parent, *args, **kwargs)
-            self.insert(0, datetime.now().strftime("%d-%m-%Y"))
+
+            self.entry = tk.Entry(self, width=width)
+            self.entry.pack(side="left", fill="x", expand=True)
+            self.entry.insert(0, datetime.now().strftime("%d-%m-%Y"))
+
+            self.button = tk.Button(self, text="📅", width=2, command=self.open_calendar)
+            self.button.pack(side="left", padx=(4, 0))
+            self._calendar_window = None
+
+        def bind(self, sequence, callback, add=None):
+            return self.entry.bind(sequence, callback, add=add)
 
         def get_date(self):
-            value = self.get().strip()
+            value = self.entry.get().strip()
             for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
                 try:
                     return datetime.strptime(value, fmt).date()
@@ -46,10 +58,90 @@ if DateEntry is None:
             try:
                 if isinstance(date_value, datetime):
                     date_value = date_value.date()
-                self.delete(0, tk.END)
-                self.insert(0, date_value.strftime("%d-%m-%Y"))
+                self.entry.delete(0, tk.END)
+                self.entry.insert(0, date_value.strftime("%d-%m-%Y"))
             except Exception:
                 pass
+
+        def open_calendar(self):
+            if self._calendar_window and self._calendar_window.winfo_exists():
+                self._calendar_window.lift()
+                return
+
+            selected_date = self.get_date()
+            self._calendar_window = tk.Toplevel(self)
+            self._calendar_window.title("Select Date")
+            self._calendar_window.transient(self)
+            self._calendar_window.grab_set()
+            self._calendar_window.resizable(False, False)
+
+            self._cal_year = selected_date.year
+            self._cal_month = selected_date.month
+            self._cal_day = selected_date.day
+
+            header = tk.Frame(self._calendar_window)
+            header.pack(padx=8, pady=8)
+
+            prev_btn = tk.Button(header, text="<", width=3, command=self._move_prev_month)
+            prev_btn.pack(side="left")
+            self._month_label = tk.Label(header, text="", width=16)
+            self._month_label.pack(side="left", padx=4)
+            next_btn = tk.Button(header, text=">", width=3, command=self._move_next_month)
+            next_btn.pack(side="left")
+
+            self._days_frame = tk.Frame(self._calendar_window)
+            self._days_frame.pack(padx=8, pady=(0, 8))
+
+            self._draw_calendar()
+
+        def _move_prev_month(self):
+            self._cal_month -= 1
+            if self._cal_month < 1:
+                self._cal_month = 12
+                self._cal_year -= 1
+            self._draw_calendar()
+
+        def _move_next_month(self):
+            self._cal_month += 1
+            if self._cal_month > 12:
+                self._cal_month = 1
+                self._cal_year += 1
+            self._draw_calendar()
+
+        def _draw_calendar(self):
+            for child in self._days_frame.winfo_children():
+                child.destroy()
+
+            month_name = datetime(self._cal_year, self._cal_month, 1).strftime("%B %Y")
+            self._month_label.config(text=month_name)
+
+            day_names = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+            for idx, name in enumerate(day_names):
+                tk.Label(self._days_frame, text=name, width=4, font=("Arial", 8, "bold")).grid(row=0, column=idx)
+
+            month_days = calendar.monthcalendar(self._cal_year, self._cal_month)
+            for row_idx, week in enumerate(month_days, start=1):
+                for col_idx, day in enumerate(week):
+                    if day == 0:
+                        tk.Label(self._days_frame, text="", width=4).grid(row=row_idx, column=col_idx)
+                    else:
+                        btn = tk.Button(
+                            self._days_frame,
+                            text=str(day),
+                            width=4,
+                            command=lambda d=day: self._select_day(d),
+                        )
+                        btn.grid(row=row_idx, column=col_idx)
+
+        def _select_day(self, day):
+            try:
+                selected = datetime(self._cal_year, self._cal_month, day)
+                self.set_date(selected)
+            except Exception:
+                selected = datetime.now()
+                self.set_date(selected)
+            if self._calendar_window and self._calendar_window.winfo_exists():
+                self._calendar_window.destroy()
 
 try:
     from openpyxl import Workbook
@@ -255,6 +347,7 @@ class DataManager:
         self.machines_db = set()
         self.operators_db = set()
         self.status_db = {
+            "TO DO",
             "In Progress",
             "Sub Con",
             "Finished",
@@ -264,6 +357,7 @@ class DataManager:
         }
         # Mapping status -> color hex (strings). Keys are case-sensitive as displayed.
         self.status_colors = {
+            "TO DO": "#fff4e0",
             "In Progress": "#e7f3ff",
             "Sub Con": "#fff3cd",
             "Finished": "#d4edda",
@@ -431,8 +525,6 @@ class ScheduleApp:
         db_path = get_saved_db_path()
         self.data_mgr = DataManager(db_path)
 
-        self.priorities_db = ["Low", "Normal", "High", "URGENT"]
-
         self.editing_job_id = None
         self.editing_sub_idx = None
         self.temp_sub_items = []
@@ -584,16 +676,6 @@ class ScheduleApp:
         )
         btn_reset_filters.pack(side="left")
 
-        btn_import = tk.Button(
-            top_bar,
-            text="📥 Import from Excel",
-            bg="#16a085",
-            fg="white",
-            font=("Arial", 9, "bold"),
-            command=self.import_from_excel,
-        )
-        btn_import.pack(side="right", padx=(0, 5))
-
         btn_export = tk.Button(
             top_bar,
             text="📊 Export to Excel",
@@ -705,17 +787,8 @@ class ScheduleApp:
         self.sub_entry_qty = tk.Spinbox(sub_inputs, from_=1, to=100000, width=6)
         self.sub_entry_qty.grid(row=0, column=7, padx=2)
 
-        tk.Label(sub_inputs, text="Priority:", bg="#eef2f7").grid(
-            row=1, column=0, sticky="w", pady=4
-        )
-        self.sub_combo_priority = ttk.Combobox(
-            sub_inputs, values=self.priorities_db, state="readonly", width=12
-        )
-        self.sub_combo_priority.grid(row=1, column=1, padx=2, pady=4)
-        self.sub_combo_priority.set("Normal")
-
         tk.Label(sub_inputs, text="Due Date:", bg="#eef2f7").grid(
-            row=1, column=2, sticky="w"
+            row=1, column=0, sticky="w"
         )
         self.sub_entry_date = DateEntry(
             sub_inputs, width=11, date_pattern="dd-mm-yyyy", locale="en_US"
@@ -772,8 +845,7 @@ class ScheduleApp:
             self.sub_entry_name.bind("<Return>", lambda e: self.sub_combo_machine.focus_set())
             self.sub_combo_machine.bind("<Return>", lambda e: self.sub_combo_operator.focus_set())
             self.sub_combo_operator.bind("<Return>", lambda e: self.sub_entry_qty.focus_set())
-            self.sub_entry_qty.bind("<Return>", lambda e: self.sub_combo_priority.focus_set())
-            self.sub_combo_priority.bind("<Return>", lambda e: self.sub_entry_date.focus_set())
+            self.sub_entry_qty.bind("<Return>", lambda e: self.sub_entry_date.focus_set())
             self.sub_entry_date.bind("<Return>", lambda e: self.sub_combo_status.focus_set())
             self.sub_combo_status.bind("<Return>", lambda e: self.sub_entry_mct.focus_set())
             self.sub_entry_mct.bind("<Return>", lambda e: self.sub_entry_file.focus_set())
@@ -791,7 +863,6 @@ class ScheduleApp:
                 "machine",
                 "operator",
                 "qty",
-                "priority",
                 "date",
                 "status",
                 "mct",
@@ -806,7 +877,6 @@ class ScheduleApp:
             ("machine", "Machine", 110),
             ("operator", "Operator", 90),
             ("qty", "Qty", 50),
-            ("priority", "Priority", 70),
             ("date", "Due Date 📅", 85),
             ("status", "Status", 90),
             ("mct", "MCT", 80),
@@ -865,9 +935,9 @@ class ScheduleApp:
         # --- TABELA GŁÓWNA ---
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Treeview", font=("Arial", 9), rowheight=26)
+        style.configure("Treeview", font=("Arial", 10), rowheight=24)
         style.configure(
-            "Treeview.Heading", font=("Arial", 9, "bold"), background="#cbd5e1"
+            "Treeview.Heading", font=("Arial", 10, "bold"), background="#cbd5e1"
         )
 
         table_frame = tk.Frame(self.root, bg="#f4f4f9")
@@ -883,7 +953,6 @@ class ScheduleApp:
             "machine",
             "operator",
             "qty",
-            "priority",
             "status",
             "mct",
             "file",
@@ -905,7 +974,6 @@ class ScheduleApp:
             "machine": "Machine ⚙️",
             "operator": "Operator 👤",
             "qty": "Qty",
-            "priority": "Priority",
             "status": "Status 🔄",
             "mct": "MCT 📜",
             "file": "Drawing / File",
@@ -920,7 +988,6 @@ class ScheduleApp:
             "machine": 110,
             "operator": 100,
             "qty": 50,
-            "priority": 70,
             "status": 110,
             "mct": 80,
             "file": 140,
@@ -930,7 +997,7 @@ class ScheduleApp:
             self.tree.heading(col, text=headers[col], command=lambda c=col: self.sort_tree_by_column(c))
             anchor = (
                 "center"
-                if col in ("job", "po", "sub_no", "qty", "priority", "date", "status", "mct")
+                if col in ("job", "po", "sub_no", "qty", "date", "status", "mct")
                 else "w"
             )
             self.tree.column(col, width=widths[col], anchor=anchor)
@@ -938,11 +1005,13 @@ class ScheduleApp:
         # PODWÓJNE KLIKNIĘCIE WIERSZA (INTELIGENTNA OBSŁUGA)
         self.tree.bind("<Double-1>", self.on_double_click_row)
 
-        self.tree.tag_configure("job_header", font=("Arial", 9, "bold"))
+        self.tree.tag_configure(
+            "job_header", font=("Arial", 10, "bold"), background="#e5e7eb", foreground="#111827"
+        )
 
         # Special tags (status tags configured dynamically later)
         self.tree.tag_configure("overdue", background="#f8d7da", foreground="#721c24")
-        self.tree.tag_configure("separator", background="#e2e8f0", foreground="#e2e8f0")
+        self.tree.tag_configure("separator", background="#ffffff", foreground="#ffffff")
 
         scrollbar = ttk.Scrollbar(
             table_frame, orient="vertical", command=self.tree.yview
@@ -1041,7 +1110,7 @@ class ScheduleApp:
         self.update_clock()
         self.load_data()
         self.check_file_updates()
-        self.check_due_date_reminders()
+        self.check_due_date_reminders(startup=True)
 
     def check_file_updates(self):
         try:
@@ -1057,7 +1126,7 @@ class ScheduleApp:
             pass
         self.root.after(5000, self.check_file_updates)
 
-    def check_due_date_reminders(self):
+    def check_due_date_reminders(self, startup=False):
         try:
             reminded_dates = getattr(self, "_reminded_dates", None)
             if reminded_dates is None:
@@ -1088,6 +1157,8 @@ class ScheduleApp:
                     reminded_dates[reminder_key] = True
         except Exception:
             pass
+        if startup:
+            return
         self.root.after(60000, self.check_due_date_reminders)
 
     def open_reminder_window(self):
@@ -1215,13 +1286,17 @@ class ScheduleApp:
             if not item_id:
                 return
 
-            if column == "#12":  # MCT Column
+            # Ensure actions operate on the row that was double-clicked.
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+
+            if column == "#11":  # MCT Column
                 self.open_selected_mct()
                 return
-            elif column == "#13":  # File Column
+            elif column == "#12":  # File Column
                 self.open_selected_file()
                 return
-            elif column == "#11":  # Status Column
+            elif column == "#10":  # Status Column
                 self.open_status_change_dialog()
                 return
             elif column in ("#5", "#6"):  # Item No / Part Name Column
@@ -1568,8 +1643,7 @@ class ScheduleApp:
         self.sub_combo_operator.set("")
         self.sub_entry_qty.delete(0, tk.END)
         self.sub_entry_qty.insert(0, "1")
-        self.sub_combo_priority.set("Normal")
-        self.sub_combo_status.set("In Progress")
+        self.sub_combo_status.set("TO DO")
         self.sub_entry_mct.delete(0, tk.END)
         self.sub_entry_file.delete(0, tk.END)
         self.editing_sub_idx = None
@@ -1604,7 +1678,7 @@ class ScheduleApp:
 
         m_val = self.sub_combo_machine.get().strip()
         o_val = self.sub_combo_operator.get().strip()
-        s_val = self.sub_combo_status.get().strip() or "In Progress"
+        s_val = self.sub_combo_status.get().strip() or "TO DO"
 
         if m_val:
             self.data_mgr.machines_db.add(m_val)
@@ -1618,7 +1692,6 @@ class ScheduleApp:
             "machine": m_val,
             "operator": o_val,
             "qty": qty_str,
-            "priority": self.sub_combo_priority.get(),
             "date": self.sub_entry_date.get_date().strftime("%d-%m-%Y"),
             "status": s_val,
             "mct": self.sub_entry_mct.get().strip(),
@@ -1651,7 +1724,6 @@ class ScheduleApp:
                     it["machine"],
                     it["operator"],
                     it["qty"],
-                    it["priority"],
                     it["date"],
                     it["status"],
                     it.get("mct", ""),
@@ -1662,7 +1734,9 @@ class ScheduleApp:
     def start_edit_sub_item(self):
         sel = self.sub_tree.selection()
         if not sel:
+            messagebox.showinfo("Information", "Please select a Sub-part to edit.")
             return
+
         idx = int(sel[0])
         it = self.temp_sub_items[idx]
         self.editing_sub_idx = idx
@@ -1673,8 +1747,32 @@ class ScheduleApp:
         self.sub_combo_operator.set(it["operator"])
         self.sub_entry_qty.delete(0, tk.END)
         self.sub_entry_qty.insert(0, it["qty"])
-        self.sub_combo_priority.set(it["priority"])
+        try:
+            d_obj = datetime.strptime(it["date"], "%d-%m-%Y")
+            self.sub_entry_date.set_date(d_obj)
+        except Exception:
+            pass
 
+        self.sub_combo_status.set(it["status"])
+        self.sub_entry_mct.delete(0, tk.END)
+        self.sub_entry_mct.insert(0, it.get("mct", ""))
+        self.sub_entry_file.delete(0, tk.END)
+        self.sub_entry_file.insert(0, it["file"])
+
+        self.btn_save_sub.config(text="Update Sub-part", bg="#d35400")
+
+    def remove_sub_item_from_list(self):
+
+        idx = int(sel[0])
+        it = self.temp_sub_items[idx]
+        self.editing_sub_idx = idx
+
+        self.sub_entry_name.delete(0, tk.END)
+        self.sub_entry_name.insert(0, it["name"])
+        self.sub_combo_machine.set(it["machine"])
+        self.sub_combo_operator.set(it["operator"])
+        self.sub_entry_qty.delete(0, tk.END)
+        self.sub_entry_qty.insert(0, it["qty"])
         try:
             d_obj = datetime.strptime(it["date"], "%d-%m-%Y")
             self.sub_entry_date.set_date(d_obj)
@@ -1896,11 +1994,7 @@ class ScheduleApp:
                 matching_subs.append((idx, it))
 
             if matching_subs:
-                has_high_priority = any(
-                    str(it.get("priority", "")).strip().lower() == "high"
-                    for _, it in matching_subs
-                )
-                parent_text = f"⭐ 📦 Order: {job_no}" if has_high_priority else f"📦 Order: {job_no}"
+                parent_text = f"📦 Order: {job_no}"
 
                 parent_node = self.tree.insert(
                     "",
@@ -1912,8 +2006,7 @@ class ScheduleApp:
                         "",
                         job_no,
                         po,
-                        f"({len(matching_subs)} sub-parts)",
-                        "—",
+                        "",
                         "—",
                         "—",
                         "—",
@@ -1959,7 +2052,6 @@ class ScheduleApp:
                             it["machine"],
                             it["operator"],
                             it["qty"],
-                            it["priority"],
                             it["status"],
                             it.get("mct", ""),
                             os.path.basename(it["file"]) if it["file"] else "",
@@ -2038,7 +2130,6 @@ class ScheduleApp:
             title_txt = f"Quick Edit ALL Sub-parts in {job_no}"
             init_m = sub_items[0]["machine"] if sub_items else ""
             init_o = sub_items[0]["operator"] if sub_items else ""
-            init_p = sub_items[0]["priority"] if sub_items else "Normal"
             init_mct = sub_items[0].get("mct", "") if sub_items else ""
         else:
             job_no, idx_str = item_id.split("_")
@@ -2047,11 +2138,10 @@ class ScheduleApp:
             title_txt = f"Quick Edit: {sub_item['sub_no']}"
             init_m = sub_item["machine"]
             init_o = sub_item["operator"]
-            init_p = sub_item["priority"]
             init_mct = sub_item.get("mct", "")
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Quick Edit Machine / Operator / Priority / MCT")
+        dlg.title("Quick Edit Machine / Operator / MCT")
         dlg.geometry("360x290")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -2077,22 +2167,14 @@ class ScheduleApp:
         c_o.grid(row=1, column=1, padx=5, pady=4)
         c_o.set(init_o)
 
-        tk.Label(f_inputs, text="Priority:").grid(row=2, column=0, sticky="w", pady=4)
-        c_p = ttk.Combobox(
-            f_inputs, values=self.priorities_db, state="readonly", width=16
-        )
-        c_p.grid(row=2, column=1, padx=5, pady=4)
-        c_p.set(init_p)
-
-        tk.Label(f_inputs, text="MCT:").grid(row=3, column=0, sticky="w", pady=4)
+        tk.Label(f_inputs, text="MCT:").grid(row=2, column=0, sticky="w", pady=4)
         c_mct = tk.Entry(f_inputs, width=18)
-        c_mct.grid(row=3, column=1, padx=5, pady=4)
+        c_mct.grid(row=2, column=1, padx=5, pady=4)
         c_mct.insert(0, init_mct)
 
         def save_quick():
             m_val = c_m.get().strip()
             o_val = c_o.get().strip()
-            p_val = c_p.get().strip()
             mct_val = c_mct.get().strip()
             if m_val:
                 self.data_mgr.machines_db.add(m_val)
@@ -2103,12 +2185,10 @@ class ScheduleApp:
                 for sub in self.data_mgr.all_jobs_data[job_no]["sub_items"]:
                     sub["machine"] = m_val
                     sub["operator"] = o_val
-                    sub["priority"] = p_val
                     sub["mct"] = mct_val
             else:
                 sub_item["machine"] = m_val
                 sub_item["operator"] = o_val
-                sub_item["priority"] = p_val
                 sub_item["mct"] = mct_val
 
             self.update_all_comboboxes()
@@ -2201,7 +2281,6 @@ class ScheduleApp:
             "Machine",
             "Operator",
             "Qty",
-            "Priority",
             "Status",
             "MCT",
             "File Path",
@@ -2249,7 +2328,6 @@ class ScheduleApp:
                             it["machine"],
                             it["operator"],
                             it["qty"],
-                            it["priority"],
                             it["status"],
                             it.get("mct", ""),
                             it["file"],
@@ -2371,176 +2449,6 @@ class ScheduleApp:
         if not result:
             return None
         return result
-
-    def import_from_excel(self):
-        if load_workbook is None:
-            messagebox.showerror(
-                "Import Error",
-                "Excel import is unavailable because openpyxl is not installed.",
-            )
-            return
-
-        filename = filedialog.askopenfilename(
-            defaultextension=".xlsx",
-            filetypes=[
-                ("Excel files", "*.xlsx;*.xlsm;*.xltx;*.xltm"),
-                ("All files", "*.*"),
-            ],
-            title="Import Schedule Data from Excel",
-        )
-        if not filename:
-            return
-
-        try:
-            wb = load_workbook(filename, data_only=True)
-            ws = wb.active
-            # Try to detect the header row among the first 10 rows (take the row with most non-empty cells)
-            best_row = None
-            best_count = -1
-            for r in range(1, min(11, ws.max_row + 1)):
-                row_cells = ws[r]
-                row_vals = [str(cell.value).strip() if cell.value is not None else "" for cell in row_cells]
-                non_empty = sum(1 for v in row_vals if v)
-                if non_empty > best_count:
-                    best_count = non_empty
-                    best_row = row_vals
-            if not best_row or best_count == 0:
-                messagebox.showerror(
-                    "Import Error",
-                    "Could not detect header row in Excel file. Make sure headers are in the first rows.",
-                )
-                return
-            header_row = best_row
-
-            # Fields we will ask the user to map
-            targets = [
-                "client",
-                "due date",
-                "job no",
-                "po number",
-                "sub-part no",
-                "part name",
-                "machine",
-                "operator",
-                "qty",
-                "priority",
-                "status",
-                "mct",
-                "file path",
-            ]
-
-            mapping = self.show_column_mapping_dialog(header_row, targets)
-            if mapping is None:
-                return
-
-            # build header_map: target -> index
-            header_map = {}
-            for key, header_name in mapping.items():
-                if header_name:
-                    try:
-                        idx = header_row.index(header_name)
-                        header_map[key] = idx
-                    except ValueError:
-                        # header not found, ignore
-                        pass
-
-            if "job no" not in header_map:
-                messagebox.showerror(
-                    "Import Error",
-                    "You must map the 'Job No' column to import data.",
-                )
-                return
-
-            imported_rows = 0
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if not any(row):
-                    continue
-
-                def val(name):
-                    idx = header_map.get(name)
-                    return row[idx] if idx is not None and idx < len(row) else ""
-
-                client = str(val("client")).strip()
-                job_no = str(val("job no")).strip()
-                po = str(val("po number")).strip()
-                sub_no = str(val("sub-part no")).strip()
-                part_name = str(val("part name")).strip()
-                machine = str(val("machine")).strip()
-                operator = str(val("operator")).strip()
-                qty = val("qty")
-                priority = str(val("priority")).strip()
-                status = str(val("status")).strip()
-                mct = str(val("mct")).strip()
-                file_path = str(val("file path")).strip()
-
-                if not job_no:
-                    continue
-
-                due_date_val = val("due date")
-                due_date = ""
-                if isinstance(due_date_val, (datetime,)):
-                    due_date = due_date_val.strftime("%d-%m-%Y")
-                elif due_date_val is not None:
-                    due_date = str(due_date_val).strip()
-
-                if job_no not in self.data_mgr.all_jobs_data:
-                    self.data_mgr.all_jobs_data[job_no] = {
-                        "client": client,
-                        "po": po,
-                        "sub_items": [],
-                    }
-                else:
-                    existing_job = self.data_mgr.all_jobs_data[job_no]
-                    if client:
-                        existing_job["client"] = client
-                    if po:
-                        existing_job["po"] = po
-
-                sub_item = {
-                    "sub_no": sub_no or f"{job_no}/1",
-                    "name": part_name,
-                    "machine": machine,
-                    "operator": operator,
-                    "qty": qty if qty is not None else "",
-                    "priority": priority,
-                    "date": due_date,
-                    "status": status,
-                    "mct": mct,
-                    "file": file_path,
-                }
-
-                job_data = self.data_mgr.all_jobs_data[job_no]
-                existing_subs = {it["sub_no"]: it for it in job_data.get("sub_items", [])}
-                if sub_item["sub_no"] in existing_subs:
-                    existing_subs[sub_item["sub_no"]].update(sub_item)
-                else:
-                    job_data.setdefault("sub_items", []).append(sub_item)
-
-                if client:
-                    self.data_mgr.clients_db.add(client)
-                if machine:
-                    self.data_mgr.machines_db.add(machine)
-                if operator:
-                    self.data_mgr.operators_db.add(operator)
-                if status:
-                    self.data_mgr.status_db.add(status)
-                    if status not in self.data_mgr.status_colors:
-                        self.data_mgr.status_colors[status] = "#ffffff"
-
-                imported_rows += 1
-
-            self.update_all_comboboxes()
-            self.save_data()
-            self.refresh_tree()
-            messagebox.showinfo(
-                "Import Successful",
-                f"Imported {imported_rows} rows from Excel file."
-            )
-        except Exception as e:
-            messagebox.showerror(
-                "Import Error",
-                f"Failed to import Excel data:\n{str(e)}",
-            )
 
 
 if __name__ == "__main__":
