@@ -1,6 +1,12 @@
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
+from datetime import datetime
+
+try:
+    from tkcalendar import Calendar
+except ImportError:
+    Calendar = None
 
 
 class CalibrationApp:
@@ -110,6 +116,17 @@ class CalibrationApp:
             style.map(name, background=[("active", bg)])
 
         style.configure(
+            "Calendar.TButton",
+            background=BTN_EDIT,
+            foreground=BTN_FG,
+            font=("Segoe UI", 9, "bold"),
+            padding=[8, 4],
+            borderwidth=0,
+            relief="flat",
+        )
+        style.map("Calendar.TButton", background=[("active", BTN_EDIT)])
+
+        style.configure(
             "Custom.Treeview",
             background=TREE_BG,
             foreground=TREE_FG,
@@ -140,19 +157,31 @@ class CalibrationApp:
                 name TEXT,
                 serial_number TEXT,
                 last_calibration TEXT,
-                next_calibration TEXT
+                next_calibration TEXT,
+                measurement_range TEXT
             )
         """
         )
+        # Lightweight migration for existing databases created before measurement_range was added.
+        self.cursor.execute("PRAGMA table_info(equipment)")
+        equipment_columns = [row[1] for row in self.cursor.fetchall()]
+        if "measurement_range" not in equipment_columns:
+            self.cursor.execute("ALTER TABLE equipment ADD COLUMN measurement_range TEXT")
         self.cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS tool_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
-                description TEXT
+                description TEXT,
+                measurement_range TEXT
             )
         """
         )
+        # Lightweight migration for existing databases created before measurement_range was added.
+        self.cursor.execute("PRAGMA table_info(tool_types)")
+        tool_type_columns = [row[1] for row in self.cursor.fetchall()]
+        if "measurement_range" not in tool_type_columns:
+            self.cursor.execute("ALTER TABLE tool_types ADD COLUMN measurement_range TEXT")
         defaults = [
             ("Micrometer", "External micrometer"),
             ("Caliper", "Vernier / digital caliper"),
@@ -180,26 +209,39 @@ class CalibrationApp:
         ttk.Button(btn_frame, text="Delete", style="Del.TButton",
                    command=self.delete_tool_type).pack(side="left")
 
-        columns = ("ID", "Tool Name", "Description")
+        columns = ("ID", "Tool Name", "Description", "Measurement Range")
         self.tool_tree = ttk.Treeview(frame, columns=columns, show="headings", style="Custom.Treeview")
         self.tool_tree.heading("ID", text="ID")
         self.tool_tree.heading("Tool Name", text="Tool Name")
         self.tool_tree.heading("Description", text="Description")
         self.tool_tree.column("ID", width=40, anchor="center")
         self.tool_tree.column("Tool Name", width=220)
-        self.tool_tree.column("Description", width=450)
+        self.tool_tree.column("Description", width=350)
+        self.tool_tree.heading("Measurement Range", text="Measurement Range")
+        self.tool_tree.column("Measurement Range", width=220)
         self.tool_tree.tag_configure("odd", background=self._row_odd)
         self.tool_tree.tag_configure("even", background=self._row_even)
         sb = ttk.Scrollbar(frame, orient="vertical", command=self.tool_tree.yview)
         self.tool_tree.configure(yscrollcommand=sb.set)
+        self.tool_tree.bind("<Double-1>", self._on_tool_double_click)
         self.tool_tree.pack(fill="both", expand=True, padx=10, pady=(0, 10), side="left")
         sb.pack(fill="y", pady=(0, 10), side="left")
         self.load_tool_types()
 
+    def _on_tool_double_click(self, event):
+        row_id = self.tool_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.tool_tree.selection_set(row_id)
+        self.tool_tree.focus(row_id)
+        self.edit_tool_type()
+
     def load_tool_types(self):
         for row in self.tool_tree.get_children():
             self.tool_tree.delete(row)
-        self.cursor.execute("SELECT id, name, description FROM tool_types ORDER BY name")
+        self.cursor.execute(
+            "SELECT id, name, description, measurement_range FROM tool_types ORDER BY name"
+        )
         for i, row in enumerate(self.cursor.fetchall()):
             self.tool_tree.insert("", "end", values=row, tags=("odd" if i % 2 else "even",))
 
@@ -210,7 +252,7 @@ class CalibrationApp:
     def open_tool_window(self, title, data=None, on_save=None):
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry("420x200")
+        win.geometry("460x250")
         win.configure(bg="#253447")
         win.grab_set()
         win.resizable(False, False)
@@ -222,26 +264,33 @@ class CalibrationApp:
             row=1, column=0, padx=16, pady=12, sticky="w")
         e_desc = ttk.Entry(win, style="Custom.TEntry", width=28)
         e_desc.grid(row=1, column=1, padx=16, pady=12)
+        ttk.Label(win, text="Measurement Range:", style="Custom.TLabel").grid(
+            row=2, column=0, padx=16, pady=12, sticky="w")
+        e_range = ttk.Entry(win, style="Custom.TEntry", width=28)
+        e_range.grid(row=2, column=1, padx=16, pady=12)
         if data:
             e_name.insert(0, data[1])
             e_desc.insert(0, data[2] or "")
+            e_range.insert(0, data[3] or "")
 
         def save():
             name = e_name.get().strip()
             if not name:
                 messagebox.showwarning("Error", "Tool name is required!", parent=win)
                 return
-            on_save(name, e_desc.get().strip())
+            on_save(name, e_desc.get().strip(), e_range.get().strip())
             win.destroy()
 
         ttk.Button(win, text="Save", style="Add.TButton", command=save).grid(
-            row=2, column=0, columnspan=2, pady=16)
+            row=3, column=0, columnspan=2, pady=16)
 
     def add_tool_type(self):
-        def save_action(name, desc):
+        def save_action(name, desc, measurement_range):
             try:
                 self.cursor.execute(
-                    "INSERT INTO tool_types (name, description) VALUES (?, ?)", (name, desc))
+                    "INSERT INTO tool_types (name, description, measurement_range) VALUES (?, ?, ?)",
+                    (name, desc, measurement_range),
+                )
                 self.conn.commit()
                 self.load_tool_types()
             except sqlite3.IntegrityError:
@@ -256,11 +305,12 @@ class CalibrationApp:
         data = self.tool_tree.item(selected[0])["values"]
         tool_id = data[0]
 
-        def save_action(name, desc):
+        def save_action(name, desc, measurement_range):
             try:
                 self.cursor.execute(
-                    "UPDATE tool_types SET name=?, description=? WHERE id=?",
-                    (name, desc, tool_id))
+                    "UPDATE tool_types SET name=?, description=?, measurement_range=? WHERE id=?",
+                    (name, desc, measurement_range, tool_id),
+                )
                 self.conn.commit()
                 self.load_tool_types()
             except sqlite3.IntegrityError:
@@ -301,7 +351,10 @@ class CalibrationApp:
             command=lambda: self.delete_equipment(category),
         ).pack(side="left")
 
-        columns = ("ID", "Name", "Serial Number", "Last Calib.", "Next Calib.")
+        if category == "external":
+            columns = ("ID", "Name", "Serial Number", "Last Calib.", "Next Calib.", "Range")
+        else:
+            columns = ("ID", "Name", "Serial Number", "Last Calib.", "Next Calib.")
         tree = ttk.Treeview(frame, columns=columns, show="headings", style="Custom.Treeview")
 
         tree.heading("ID", text="ID")
@@ -309,41 +362,68 @@ class CalibrationApp:
         tree.heading("Serial Number", text="Serial Number")
         tree.heading("Last Calib.", text="Last Calibration")
         tree.heading("Next Calib.", text="Next Calibration")
+        if category == "external":
+            tree.heading("Range", text="Range")
 
         tree.column("ID", width=40, anchor="center")
         tree.column("Name", width=200)
         tree.column("Serial Number", width=150)
         tree.column("Last Calib.", width=120, anchor="center")
         tree.column("Next Calib.", width=120, anchor="center")
+        if category == "external":
+            tree.column("Range", width=140, anchor="center")
 
         tree.tag_configure("odd", background=self._row_odd)
         tree.tag_configure("even", background=self._row_even)
 
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
+        tree.bind("<Double-1>", lambda event, c=category: self._on_equipment_double_click(event, c))
         tree.pack(fill="both", expand=True, padx=10, pady=(0, 10), side="left")
         scrollbar.pack(fill="y", pady=(0, 10), side="left")
         self.trees[category] = tree
 
         self.load_data(category)
 
+    def _on_equipment_double_click(self, event, category):
+        tree = self.trees[category]
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+        self.edit_equipment(category)
+
     def load_data(self, category):
         tree = self.trees[category]
         for row in tree.get_children():
             tree.delete(row)
 
-        self.cursor.execute(
-            "SELECT id, name, serial_number, last_calibration, next_calibration FROM equipment WHERE category=?",
-            (category,),
-        )
+        if category == "external":
+            self.cursor.execute(
+                """
+                SELECT id, name, serial_number, last_calibration, next_calibration, measurement_range
+                FROM equipment
+                WHERE category=?
+                """,
+                (category,),
+            )
+        else:
+            self.cursor.execute(
+                "SELECT id, name, serial_number, last_calibration, next_calibration FROM equipment WHERE category=?",
+                (category,),
+            )
         for i, row in enumerate(self.cursor.fetchall()):
             tag = "odd" if i % 2 else "even"
             tree.insert("", "end", values=row, tags=(tag,))
 
-    def open_window(self, title, data=None, on_save=None):
+    def open_window(self, title, category, data=None, on_save=None):
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry("420x300")
+        if category == "external":
+            win.geometry("420x350")
+        else:
+            win.geometry("420x300")
         win.configure(bg="#253447")
         win.grab_set()
         win.resizable(False, False)
@@ -354,15 +434,43 @@ class CalibrationApp:
         e_name = ttk.Combobox(win, values=tool_names, width=22, state="readonly")
         e_name.grid(row=0, column=1, padx=16, pady=8)
 
-        labels = ["Serial Number:", "Last Calibration:", "Next Calibration:"]
-        entries = []
-        for i, label in enumerate(labels, start=1):
-            ttk.Label(win, text=label, style="Custom.TLabel").grid(
-                row=i, column=0, padx=16, pady=8, sticky="w")
-            e = ttk.Entry(win, style="Custom.TEntry", width=24)
-            e.grid(row=i, column=1, padx=16, pady=8)
-            entries.append(e)
-        e_serial, e_last, e_next = entries
+        ttk.Label(win, text="Serial Number:", style="Custom.TLabel").grid(
+            row=1, column=0, padx=16, pady=8, sticky="w")
+        e_serial = ttk.Entry(win, style="Custom.TEntry", width=24)
+        e_serial.grid(row=1, column=1, padx=16, pady=8)
+
+        ttk.Label(win, text="Last Calibration:", style="Custom.TLabel").grid(
+            row=2, column=0, padx=16, pady=8, sticky="w")
+        last_frame = ttk.Frame(win, style="Custom.TFrame")
+        last_frame.grid(row=2, column=1, padx=16, pady=8, sticky="w")
+        e_last = ttk.Entry(last_frame, style="Custom.TEntry", width=20)
+        e_last.pack(side="left")
+        ttk.Button(
+            last_frame,
+            text="📅",
+            style="Calendar.TButton",
+            command=lambda: self.open_calendar_picker(win, e_last),
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Label(win, text="Next Calibration:", style="Custom.TLabel").grid(
+            row=3, column=0, padx=16, pady=8, sticky="w")
+        next_frame = ttk.Frame(win, style="Custom.TFrame")
+        next_frame.grid(row=3, column=1, padx=16, pady=8, sticky="w")
+        e_next = ttk.Entry(next_frame, style="Custom.TEntry", width=20)
+        e_next.pack(side="left")
+        ttk.Button(
+            next_frame,
+            text="📅",
+            style="Calendar.TButton",
+            command=lambda: self.open_calendar_picker(win, e_next),
+        ).pack(side="left", padx=(6, 0))
+
+        e_range = None
+        if category == "external":
+            ttk.Label(win, text="Range:", style="Custom.TLabel").grid(
+                row=4, column=0, padx=16, pady=8, sticky="w")
+            e_range = ttk.Entry(win, style="Custom.TEntry", width=24)
+            e_range.grid(row=4, column=1, padx=16, pady=8)
 
         if data:
             if data[1] in tool_names:
@@ -370,21 +478,70 @@ class CalibrationApp:
             e_serial.insert(0, data[2])
             e_last.insert(0, data[3])
             e_next.insert(0, data[4])
+            if category == "external" and e_range is not None and len(data) > 5:
+                e_range.insert(0, data[5] or "")
 
         def save():
             name = e_name.get().strip()
             if not name:
                 messagebox.showwarning("Error", "Please select an equipment name!", parent=win)
                 return
-            on_save(name, e_serial.get(), e_last.get(), e_next.get())
+            measurement_range = e_range.get().strip() if e_range is not None else ""
+            on_save(name, e_serial.get(), e_last.get(), e_next.get(), measurement_range)
             win.destroy()
 
         ttk.Button(win, text="Save", style="Add.TButton", command=save).grid(
-            row=4, column=0, columnspan=2, pady=18
+            row=5 if category == "external" else 4, column=0, columnspan=2, pady=18
+        )
+
+    def open_calendar_picker(self, parent, target_entry):
+        if Calendar is None:
+            messagebox.showwarning(
+                "Missing package",
+                "Calendar picker requires tkcalendar. Install it with: pip install tkcalendar",
+                parent=parent,
+            )
+            return
+
+        picker = tk.Toplevel(parent)
+        picker.title("Select Date")
+        picker.configure(bg="#253447")
+        picker.resizable(False, False)
+        picker.grab_set()
+
+        current_value = target_entry.get().strip()
+        try:
+            selected = datetime.strptime(current_value, "%d.%m.%Y")
+        except ValueError:
+            try:
+                selected = datetime.strptime(current_value, "%Y-%m-%d")
+            except ValueError:
+                try:
+                    selected = datetime.strptime(current_value, "%d-%m-%Y")
+                except ValueError:
+                    selected = datetime.today()
+
+        cal = Calendar(
+            picker,
+            selectmode="day",
+            date_pattern="dd.mm.yyyy",
+            year=selected.year,
+            month=selected.month,
+            day=selected.day,
+        )
+        cal.pack(padx=12, pady=12)
+
+        def apply_date():
+            target_entry.delete(0, tk.END)
+            target_entry.insert(0, cal.get_date())
+            picker.destroy()
+
+        ttk.Button(picker, text="Use Date", style="Add.TButton", command=apply_date).pack(
+            pady=(0, 12)
         )
 
     def add_equipment(self, category):
-        def save_action(name, serial, last_cal, next_cal):
+        def save_action(name, serial, last_cal, next_cal, measurement_range):
             if not name:
                 messagebox.showwarning(
                     "Error", "Equipment name is required!"
@@ -392,15 +549,15 @@ class CalibrationApp:
                 return
             self.cursor.execute(
                 """
-                INSERT INTO equipment (category, name, serial_number, last_calibration, next_calibration)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO equipment (category, name, serial_number, last_calibration, next_calibration, measurement_range)
+                VALUES (?, ?, ?, ?, ?, ?)
             """,
-                (category, name, serial, last_cal, next_cal),
+                (category, name, serial, last_cal, next_cal, measurement_range),
             )
             self.conn.commit()
             self.load_data(category)
 
-        self.open_window("Add Equipment", on_save=save_action)
+        self.open_window("Add Equipment", category, on_save=save_action)
 
     def edit_equipment(self, category):
         tree = self.trees[category]
@@ -414,20 +571,20 @@ class CalibrationApp:
         item_data = tree.item(selected[0])["values"]
         item_id = item_data[0]
 
-        def save_action(name, serial, last_cal, next_cal):
+        def save_action(name, serial, last_cal, next_cal, measurement_range):
             self.cursor.execute(
                 """
                 UPDATE equipment 
-                SET name=?, serial_number=?, last_calibration=?, next_calibration=?
+                SET name=?, serial_number=?, last_calibration=?, next_calibration=?, measurement_range=?
                 WHERE id=?
             """,
-                (name, serial, last_cal, next_cal, item_id),
+                (name, serial, last_cal, next_cal, measurement_range, item_id),
             )
             self.conn.commit()
             self.load_data(category)
 
         self.open_window(
-            "Edit Equipment", data=item_data, on_save=save_action
+            "Edit Equipment", category, data=item_data, on_save=save_action
         )
 
     def delete_equipment(self, category):
