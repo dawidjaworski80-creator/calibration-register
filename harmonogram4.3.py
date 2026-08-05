@@ -1143,7 +1143,8 @@ class ScheduleApp:
                         due_date = datetime.strptime(item.get("date", ""), "%d-%m-%Y").date()
                     except Exception:
                         continue
-                    if item.get("status", "") == "Finished":
+                    status_norm = str(item.get("status", "")).strip().lower()
+                    if status_norm in ("finished", "delivered"):
                         continue
                     if due_date < today:
                         overdue_items.append((job_no, job_data, item))
@@ -1172,7 +1173,8 @@ class ScheduleApp:
                     due_date = datetime.strptime(item.get("date", ""), "%d-%m-%Y").date()
                 except Exception:
                     continue
-                if item.get("status", "") == "Finished":
+                status_norm = str(item.get("status", "")).strip().lower()
+                if status_norm in ("finished", "delivered"):
                     continue
                 if due_date < today:
                     overdue_items.append((job_no, job_data, item))
@@ -1297,13 +1299,32 @@ class ScheduleApp:
                 self.open_selected_file()
                 return
             elif column == "#10":  # Status Column
-                self.open_status_change_dialog()
+                self.open_status_change_dialog(event)
                 return
             elif column in ("#5", "#6"):  # Item No / Part Name Column
                 self.start_edit_job()
                 return
 
-        self.open_quick_assign_dialog()
+        self.open_quick_assign_dialog(event)
+
+    def position_dialog_near_cursor(self, dlg, event=None, x_offset=8, y_offset=8):
+        """Place dialog near click/pointer and keep it inside screen bounds."""
+        dlg.update_idletasks()
+        width = dlg.winfo_width()
+        height = dlg.winfo_height()
+        screen_w = dlg.winfo_screenwidth()
+        screen_h = dlg.winfo_screenheight()
+
+        if event is not None and hasattr(event, "x_root") and hasattr(event, "y_root"):
+            x = int(event.x_root) + x_offset
+            y = int(event.y_root) + y_offset
+        else:
+            x = dlg.winfo_pointerx() + x_offset
+            y = dlg.winfo_pointery() + y_offset
+
+        x = max(0, min(x, max(0, screen_w - width - 10)))
+        y = max(0, min(y, max(0, screen_h - height - 50)))
+        dlg.geometry(f"+{x}+{y}")
 
     def sort_tree_by_column(self, col):
         if self.sort_column == col:
@@ -2115,7 +2136,7 @@ class ScheduleApp:
                 "Warning", "File path is empty or file does not exist!"
             )
 
-    def open_quick_assign_dialog(self):
+    def open_quick_assign_dialog(self, event=None):
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("Information", "Please select an Order or Sub-part row first.")
@@ -2144,6 +2165,7 @@ class ScheduleApp:
         dlg.title("Quick Edit Machine / Operator / MCT")
         dlg.geometry("360x290")
         dlg.resizable(False, False)
+        self.position_dialog_near_cursor(dlg, event)
         dlg.grab_set()
 
         tk.Label(
@@ -2204,7 +2226,7 @@ class ScheduleApp:
             command=save_quick,
         ).pack(pady=10)
 
-    def open_status_change_dialog(self):
+    def open_status_change_dialog(self, event=None):
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("Information", "Please select a Sub-part row first.")
@@ -2225,6 +2247,7 @@ class ScheduleApp:
         dlg.title("Change Status")
         dlg.geometry("300x140")
         dlg.resizable(False, False)
+        self.position_dialog_near_cursor(dlg, event)
         dlg.grab_set()
 
         lbl_text = f"Change Status for {len(selected_sub_items)} selected Sub-part(s)"
