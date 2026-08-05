@@ -1,34 +1,44 @@
 {
     "clients": [
-        "Brimmond",
-        "Nov",
         "Oilenco",
+        "wellvene",
+        "Brimmond",
         "Phuel",
         "Reservoir",
-        "Wellv",
         "Wellvene",
-        "Wellvention",
-        "wellvene"
+        "Wellv",
+        "Nov",
+        "Wellvention"
     ],
     "machines": [
         "350L",
-        "Integrex",
-        "—"
+        "—",
+        "Integrex"
     ],
     "operators": [
         "Damian Biesek",
-        "Dawid Jaworski",
-        "—"
+        "—",
+        "Dawid Jaworski"
     ],
     "statuses": [
-        "Finished",
         "In Progress",
+        "Sub Con",
+        "Finished",
         "Inspection",
         "On Hold",
         "Ready For Milling",
-        "Sub Con",
         "TO DO"
     ],
-    "mct_dir": "",
+    "status_colors": {
+        "In Progress": "#ffffff",
+        "Sub Con": "#ffffff",
+        "Finished": "#ff0000",
+        "Inspection": "#ffffff",
+        "On Hold": "#ffffff",
+        "Ready For Milling": "#ffffff",
+        "TO DO": "#ffffff"
+    },
+    "mct_folder": "",
+    "material_register_file": "Q:/Material Certs and Material Register/schedule.json",
     "jobs": {}
 }
