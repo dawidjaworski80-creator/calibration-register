@@ -1,12 +1,9 @@
 import sqlite3
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
-
-try:
-    from tkcalendar import Calendar
-except ImportError:
-    Calendar = None
+import os
+import importlib
 
 
 class CalibrationApp:
@@ -18,11 +15,14 @@ class CalibrationApp:
 
         self._setup_styles()
         self.init_db()
+        self.certificates_folder = self.get_setting("certificates_folder", "")
+        self._calendar_class = None
 
         self.categories = {
             "External": "external",
             "Internal": "internal",
             "Gauges": "gauges",
+            "Other": "other",
         }
 
         # Header bar
@@ -41,6 +41,7 @@ class CalibrationApp:
 
         self.tabs = {}
         self.trees = {}
+        self.cert_preview_widgets = {}
 
         for tab_name, cat_code in self.categories.items():
             tab_frame = ttk.Frame(self.notebook, style="Custom.TFrame")
@@ -158,7 +159,8 @@ class CalibrationApp:
                 serial_number TEXT,
                 last_calibration TEXT,
                 next_calibration TEXT,
-                measurement_range TEXT
+                measurement_range TEXT,
+                certificate_path TEXT
             )
         """
         )
@@ -167,6 +169,17 @@ class CalibrationApp:
         equipment_columns = [row[1] for row in self.cursor.fetchall()]
         if "measurement_range" not in equipment_columns:
             self.cursor.execute("ALTER TABLE equipment ADD COLUMN measurement_range TEXT")
+        if "certificate_path" not in equipment_columns:
+            self.cursor.execute("ALTER TABLE equipment ADD COLUMN certificate_path TEXT")
+
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """
+        )
         self.cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS tool_types (
@@ -198,6 +211,131 @@ class CalibrationApp:
             "INSERT OR IGNORE INTO tool_types (name, description) VALUES (?, ?)", defaults
         )
         self.conn.commit()
+
+    def get_setting(self, key, default=""):
+        self.cursor.execute("SELECT value FROM app_settings WHERE key=?", (key,))
+        row = self.cursor.fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key, value):
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self.conn.commit()
+
+    def choose_certificates_folder(self):
+        selected = filedialog.askdirectory(title="Select certificates folder")
+        if not selected:
+            return
+        self.certificates_folder = selected
+        self.set_setting("certificates_folder", selected)
+        for category in self.categories.values():
+            label = self.cert_folder_labels.get(category)
+            if label is not None:
+                label.config(text=f"Folder: {selected}")
+
+    def get_certificate_path_for_equipment(self, equipment_id):
+        self.cursor.execute(
+            "SELECT certificate_path FROM equipment WHERE id=?",
+            (equipment_id,),
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row and row[0] else ""
+
+    def set_certificate_path_for_equipment(self, equipment_id, cert_path):
+        self.cursor.execute(
+            "UPDATE equipment SET certificate_path=? WHERE id=?",
+            (cert_path, equipment_id),
+        )
+        self.conn.commit()
+
+    def resolve_certificate_path_for_equipment(self, equipment_id, serial_number):
+        saved_path = self.get_certificate_path_for_equipment(equipment_id)
+        if saved_path and os.path.isfile(saved_path):
+            return saved_path
+
+        # For legacy records or moved files, re-link by serial number from selected folder.
+        discovered_path = self.find_certificate_for_serial(serial_number)
+        if discovered_path:
+            if discovered_path != saved_path:
+                self.set_certificate_path_for_equipment(equipment_id, discovered_path)
+            return discovered_path
+
+        return saved_path
+
+    def open_selected_certificate(self, category):
+        widgets = self.cert_preview_widgets.get(category)
+        if widgets is None:
+            return
+        cert_path = widgets.get("current_path", "")
+        if not cert_path or not os.path.isfile(cert_path):
+            messagebox.showwarning("Open certificate", "No certificate file available for this item.")
+            return
+        try:
+            os.startfile(cert_path)
+        except OSError as exc:
+            messagebox.showerror("Open certificate", f"Could not open certificate file.\n{exc}")
+
+    def update_certificate_preview(self, category):
+        tree = self.trees.get(category)
+        widgets = self.cert_preview_widgets.get(category)
+        if tree is None or widgets is None:
+            return
+
+        selected = tree.selection()
+        if not selected:
+            widgets["title"].config(text="No equipment selected")
+            widgets["serial"].config(text="Serial number: -")
+            widgets["path"].config(text="Certificate path: -")
+            widgets["status"].config(text="Status: -")
+            widgets["current_path"] = ""
+            widgets["open_button"].config(state="disabled")
+            return
+
+        values = tree.item(selected[0]).get("values", [])
+        if not values:
+            return
+
+        equipment_id = values[0]
+        equipment_name = values[1] if len(values) > 1 else "-"
+        serial_number = values[2] if len(values) > 2 else "-"
+        cert_path = self.resolve_certificate_path_for_equipment(equipment_id, str(serial_number))
+        if cert_path and os.path.isfile(cert_path):
+            status = "Status: linked"
+            path_text = f"Certificate path: {cert_path}"
+            widgets["open_button"].config(state="normal")
+        elif cert_path:
+            status = "Status: missing file"
+            path_text = f"Certificate path: {cert_path}"
+            widgets["open_button"].config(state="disabled")
+        else:
+            status = "Status: not linked"
+            path_text = "Certificate path: -"
+            widgets["open_button"].config(state="disabled")
+
+        widgets["title"].config(text=f"{equipment_name}")
+        widgets["serial"].config(text=f"Serial number: {serial_number}")
+        widgets["path"].config(text=path_text)
+        widgets["status"].config(text=status)
+        widgets["current_path"] = cert_path
+
+    def _on_equipment_select(self, category, _event=None):
+        self.update_certificate_preview(category)
+
+    def find_certificate_for_serial(self, serial_number):
+        serial = serial_number.strip()
+        if not serial:
+            return None
+        if not self.certificates_folder:
+            return None
+        docx_path = os.path.join(self.certificates_folder, f"{serial}.docx")
+        doc_path = os.path.join(self.certificates_folder, f"{serial}.doc")
+        if os.path.isfile(docx_path):
+            return docx_path
+        if os.path.isfile(doc_path):
+            return doc_path
+        return None
 
     def build_tool_db_tab(self, frame):
         btn_frame = ttk.Frame(frame, style="Custom.TFrame")
@@ -351,11 +489,36 @@ class CalibrationApp:
             command=lambda: self.delete_equipment(category),
         ).pack(side="left")
 
+        ttk.Button(
+            btn_frame,
+            text="Certificates Folder",
+            style="Edit.TButton",
+            command=self.choose_certificates_folder,
+        ).pack(side="left", padx=(12, 0))
+
+        if not hasattr(self, "cert_folder_labels"):
+            self.cert_folder_labels = {}
+        cert_text = (
+            f"Folder: {self.certificates_folder}"
+            if self.certificates_folder
+            else "Folder: not selected"
+        )
+        folder_label = ttk.Label(frame, text=cert_text, style="Custom.TLabel")
+        folder_label.pack(fill="x", padx=12, pady=(0, 6), anchor="w")
+        self.cert_folder_labels[category] = folder_label
+
+        content_frame = ttk.Frame(frame, style="Custom.TFrame")
+        content_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
         if category == "external":
             columns = ("ID", "Name", "Serial Number", "Last Calib.", "Next Calib.", "Range")
         else:
             columns = ("ID", "Name", "Serial Number", "Last Calib.", "Next Calib.")
-        tree = ttk.Treeview(frame, columns=columns, show="headings", style="Custom.Treeview")
+
+        table_frame = ttk.Frame(content_frame, style="Custom.TFrame")
+        table_frame.pack(side="left", fill="both", expand=True)
+
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", style="Custom.Treeview")
 
         tree.heading("ID", text="ID")
         tree.heading("Name", text="Equipment Name")
@@ -376,14 +539,48 @@ class CalibrationApp:
         tree.tag_configure("odd", background=self._row_odd)
         tree.tag_configure("even", background=self._row_even)
 
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.bind("<Double-1>", lambda event, c=category: self._on_equipment_double_click(event, c))
-        tree.pack(fill="both", expand=True, padx=10, pady=(0, 10), side="left")
-        scrollbar.pack(fill="y", pady=(0, 10), side="left")
+        tree.bind("<<TreeviewSelect>>", lambda event, c=category: self._on_equipment_select(c, event))
+        tree.pack(fill="both", expand=True, side="left")
+        scrollbar.pack(fill="y", side="left")
+
+        preview_frame = ttk.Frame(content_frame, style="Custom.TFrame")
+        preview_frame.pack(side="left", fill="y", padx=(12, 0))
+        preview_frame.configure(width=420)
+        preview_frame.pack_propagate(False)
+        preview_title = ttk.Label(preview_frame, text="Certificate", style="Custom.TLabel")
+        preview_title.pack(anchor="w", pady=(4, 10))
+        preview_name = ttk.Label(preview_frame, text="No equipment selected", style="Custom.TLabel", wraplength=320)
+        preview_name.pack(anchor="w", pady=(0, 8))
+        preview_serial = ttk.Label(preview_frame, text="Serial number: -", style="Custom.TLabel", wraplength=320)
+        preview_serial.pack(anchor="w", pady=(0, 8))
+        preview_path = ttk.Label(preview_frame, text="Certificate path: -", style="Custom.TLabel", wraplength=320, justify="left")
+        preview_path.pack(anchor="w", pady=(0, 8))
+        preview_status = ttk.Label(preview_frame, text="Status: -", style="Custom.TLabel")
+        preview_status.pack(anchor="w", pady=(0, 8))
+        open_button = ttk.Button(
+            preview_frame,
+            text="Open Certificate",
+            style="Edit.TButton",
+            command=lambda c=category: self.open_selected_certificate(c),
+            state="disabled",
+        )
+        open_button.pack(anchor="w", pady=(0, 10))
+
+        self.cert_preview_widgets[category] = {
+            "title": preview_name,
+            "serial": preview_serial,
+            "path": preview_path,
+            "status": preview_status,
+            "open_button": open_button,
+            "current_path": "",
+        }
         self.trees[category] = tree
 
         self.load_data(category)
+        self.update_certificate_preview(category)
 
     def _on_equipment_double_click(self, event, category):
         tree = self.trees[category]
@@ -416,6 +613,13 @@ class CalibrationApp:
         for i, row in enumerate(self.cursor.fetchall()):
             tag = "odd" if i % 2 else "even"
             tree.insert("", "end", values=row, tags=(tag,))
+
+        items = tree.get_children()
+        if items:
+            tree.selection_set(items[0])
+            tree.focus(items[0])
+
+        self.update_certificate_preview(category)
 
     def open_window(self, title, category, data=None, on_save=None):
         win = tk.Toplevel(self.root)
@@ -495,19 +699,44 @@ class CalibrationApp:
         )
 
     def open_calendar_picker(self, parent, target_entry):
-        if Calendar is None:
-            messagebox.showwarning(
-                "Missing package",
-                "Calendar picker requires tkcalendar. Install it with: pip install tkcalendar",
-                parent=parent,
-            )
-            return
+        def open_basic_date_picker(selected_date):
+            picker = tk.Toplevel(parent)
+            picker.title("Select Date")
+            picker.configure(bg="#253447")
+            picker.resizable(False, False)
+            picker.grab_set()
 
-        picker = tk.Toplevel(parent)
-        picker.title("Select Date")
-        picker.configure(bg="#253447")
-        picker.resizable(False, False)
-        picker.grab_set()
+            form = ttk.Frame(picker, style="Custom.TFrame")
+            form.pack(padx=12, pady=12)
+
+            ttk.Label(form, text="Day:", style="Custom.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+            day_var = tk.IntVar(value=selected_date.day)
+            day_spin = tk.Spinbox(form, from_=1, to=31, width=6, textvariable=day_var)
+            day_spin.grid(row=0, column=1, padx=(8, 0), pady=4)
+
+            ttk.Label(form, text="Month:", style="Custom.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+            month_var = tk.IntVar(value=selected_date.month)
+            month_spin = tk.Spinbox(form, from_=1, to=12, width=6, textvariable=month_var)
+            month_spin.grid(row=1, column=1, padx=(8, 0), pady=4)
+
+            ttk.Label(form, text="Year:", style="Custom.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+            year_var = tk.IntVar(value=selected_date.year)
+            year_spin = tk.Spinbox(form, from_=1900, to=2100, width=8, textvariable=year_var)
+            year_spin.grid(row=2, column=1, padx=(8, 0), pady=4)
+
+            def apply_date_fallback():
+                try:
+                    chosen = datetime(year_var.get(), month_var.get(), day_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid date", "Selected date is invalid.", parent=picker)
+                    return
+                target_entry.delete(0, tk.END)
+                target_entry.insert(0, chosen.strftime("%d.%m.%Y"))
+                picker.destroy()
+
+            ttk.Button(picker, text="Use Date", style="Add.TButton", command=apply_date_fallback).pack(
+                pady=(0, 12)
+            )
 
         current_value = target_entry.get().strip()
         try:
@@ -521,7 +750,21 @@ class CalibrationApp:
                 except ValueError:
                     selected = datetime.today()
 
-        cal = Calendar(
+        if self._calendar_class is None:
+            try:
+                tkcalendar_module = importlib.import_module("tkcalendar")
+                self._calendar_class = tkcalendar_module.Calendar
+            except ModuleNotFoundError:
+                open_basic_date_picker(selected)
+                return
+
+        picker = tk.Toplevel(parent)
+        picker.title("Select Date")
+        picker.configure(bg="#253447")
+        picker.resizable(False, False)
+        picker.grab_set()
+
+        cal = self._calendar_class(
             picker,
             selectmode="day",
             date_pattern="dd.mm.yyyy",
@@ -547,12 +790,13 @@ class CalibrationApp:
                     "Error", "Equipment name is required!"
                 )
                 return
+            cert_path = self.find_certificate_for_serial(serial) or ""
             self.cursor.execute(
                 """
-                INSERT INTO equipment (category, name, serial_number, last_calibration, next_calibration, measurement_range)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO equipment (category, name, serial_number, last_calibration, next_calibration, measurement_range, certificate_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-                (category, name, serial, last_cal, next_cal, measurement_range),
+                (category, name, serial, last_cal, next_cal, measurement_range, cert_path),
             )
             self.conn.commit()
             self.load_data(category)
@@ -572,13 +816,14 @@ class CalibrationApp:
         item_id = item_data[0]
 
         def save_action(name, serial, last_cal, next_cal, measurement_range):
+            cert_path = self.find_certificate_for_serial(serial) or ""
             self.cursor.execute(
                 """
                 UPDATE equipment 
-                SET name=?, serial_number=?, last_calibration=?, next_calibration=?, measurement_range=?
+                SET name=?, serial_number=?, last_calibration=?, next_calibration=?, measurement_range=?, certificate_path=?
                 WHERE id=?
             """,
-                (name, serial, last_cal, next_cal, measurement_range, item_id),
+                (name, serial, last_cal, next_cal, measurement_range, cert_path, item_id),
             )
             self.conn.commit()
             self.load_data(category)
